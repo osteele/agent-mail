@@ -96,7 +96,10 @@ const server = Bun.serve({
       };
       const path = appendMessage(msg);
       log(`notify from=${msg.from} project=${msg.project}`);
-      await echoToSlack(msg);
+      // Fire-and-forget: the spool append is the durable commitment; a slow
+      // Slack POST must not delay the response (a timed-out client would
+      // fall back to a direct spool append and double-deliver).
+      echoToSlack(msg).catch((err) => log(`slack echo error: ${err}`));
       return json({ ok: true, spool: path });
     }
 
