@@ -29,7 +29,7 @@ import {
   ensureDirs,
 } from "./paths.ts";
 import { listLive } from "./registry.ts";
-import { readMessages } from "./spool.ts";
+import { knownProjects, readMessages } from "./spool.ts";
 
 const SRC_DIR = dirname(new URL(import.meta.url).pathname);
 const DAEMON_TS = join(SRC_DIR, "daemon.ts");
@@ -192,6 +192,43 @@ function cmdLogs(follow: boolean): void {
 
 // --- messaging ----------------------------------------------------------------
 
+/** Resolve a --project argument to an existing project directory.
+ *
+ * An existing path resolves directly. A bare name (or nonexistent path) is
+ * matched by basename against live listeners and projects that have received
+ * mail before — this catches the footgun where a relative path silently
+ * resolves against the terminal's cwd and spools to a phantom project.
+ */
+function resolveProjectArg(arg: string): string {
+  const direct = canonicalProject(arg);
+  if (existsSync(direct)) return direct;
+
+  const name = arg.split("/").filter(Boolean).pop() ?? arg;
+  const candidates = new Set<string>();
+  for (const r of listLive()) {
+    const cwd = canonicalProject(r.cwd);
+    if (cwd.split("/").pop() === name) candidates.add(cwd);
+  }
+  for (const project of knownProjects()) {
+    if (project.split("/").pop() === name) candidates.add(project);
+  }
+
+  if (candidates.size === 1) {
+    const resolved = [...candidates][0];
+    console.error(`resolved project "${arg}" -> ${resolved}`);
+    return resolved;
+  }
+  if (candidates.size > 1) {
+    console.error(`project "${arg}" is ambiguous; use a full path:`);
+    for (const c of candidates) console.error(`  ${c}`);
+  } else {
+    console.error(
+      `project "${arg}" does not exist (resolved to ${direct}) and matches no live listener or known project. Use an absolute path.`,
+    );
+  }
+  process.exit(1);
+}
+
 async function cmdNotify(
   flags: Record<string, string | boolean>,
 ): Promise<void> {
@@ -204,8 +241,9 @@ async function cmdNotify(
     process.exit(1);
   }
   const config = loadConfig();
+  const resolvedProject = resolveProjectArg(project);
   const body = JSON.stringify({
-    project: canonicalProject(project),
+    project: resolvedProject,
     message,
     from: typeof flags.from === "string" ? flags.from : "cli",
   });
@@ -228,7 +266,7 @@ async function cmdNotify(
     appendMessage({
       ts: new Date().toISOString(),
       from: typeof flags.from === "string" ? flags.from : "cli",
-      project: canonicalProject(project),
+      project: resolvedProject,
       message,
     });
     console.log("daemon unreachable; spooled directly (no Slack echo)");
@@ -237,9 +275,11 @@ async function cmdNotify(
 
 function cmdInbox(flags: Record<string, string | boolean>): void {
   const project =
-    typeof flags.project === "string" ? flags.project : process.cwd();
+    typeof flags.project === "string"
+      ? resolveProjectArg(flags.project)
+      : canonicalProject(process.cwd());
   const limit = typeof flags.limit === "string" ? Number(flags.limit) : 20;
-  const messages = readMessages(canonicalProject(project), limit);
+  const messages = readMessages(project, limit);
   if (messages.length === 0) {
     console.log("inbox empty");
     return;

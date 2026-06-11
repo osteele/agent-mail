@@ -1,7 +1,8 @@
 /** JSONL message spools: one append-only file per project. */
 
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { ensureDirs, spoolPath } from "./paths.ts";
+import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { join } from "node:path";
+import { INBOX_DIR, ensureDirs, spoolPath } from "./paths.ts";
 
 export interface Message {
   ts: string; // ISO 8601
@@ -16,6 +17,26 @@ export function appendMessage(msg: Message): string {
   const path = spoolPath(msg.project);
   appendFileSync(path, `${JSON.stringify(msg)}\n`);
   return path;
+}
+
+/** Distinct project directories that have ever received mail. */
+export function knownProjects(): string[] {
+  ensureDirs();
+  const projects = new Set<string>();
+  for (const name of readdirSync(INBOX_DIR)) {
+    if (!name.endsWith(".jsonl")) continue;
+    const firstLine = readFileSync(join(INBOX_DIR, name), "utf8").split(
+      "\n",
+      1,
+    )[0];
+    try {
+      const msg = JSON.parse(firstLine) as Message;
+      if (msg.project) projects.add(msg.project);
+    } catch {
+      // corrupt first line; skip this spool for discovery purposes
+    }
+  }
+  return [...projects];
 }
 
 export function readMessages(project: string, limit = 20): Message[] {
