@@ -1,0 +1,22 @@
+{
+  "name": "agent-mail",
+  "version": "0.1.0",
+  "description": "Local mail bus for Claude Code agents: push messages into sessions via channels, with Slack echo",
+  "type": "module",
+  "bin": {
+    "agent-mail": "src/cli.ts"
+  },
+  "scripts": {
+    "check": "biome check src/ && tsc --noEmit",
+    "fix": "biome check --write src/",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@types/bun": "latest",
+    "typescript": "^5.6.0"
+  }
+}
