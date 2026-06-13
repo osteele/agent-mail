@@ -17,9 +17,19 @@ notifications).
 - **Channel server** (`src/channel.ts`): spawned per Claude Code session as an
   MCP server. Tails the session project's spool and pushes new messages into
   the session as `<channel source="agent-mail">` events. Also exposes
-  `send_mail` / `check_inbox` tools, which work even without channel push.
+  `send_mail`, `list_sessions`, `check_inbox`, and `mark_read` tools, which
+  work even without channel push.
 - **Registry** (`~/.claude/agent-mail/registry/`): which sessions are
-  listening, pruned by pid liveness.
+  listening (`cwd`, `pid`, `sessionId`, `name`), pruned by pid liveness.
+
+### Addressing
+
+Mail is addressed to a **project directory**. Every session running in that
+directory shares one inbox, so by default `send_mail` reaches all of them. To
+reach one specific session, pass its name or id as `session` (discover targets
+with `list_sessions`); the others in that directory won't see it. A session is
+identified by `CLAUDE_CODE_SESSION_ID` and labelled with its Claude Code
+session name (set via `/rename`) when available.
 
 Delivery tiers: channel-enabled sessions get push; running sessions without
 the flag can arm a Monitor on their spool file; everything else reads the
@@ -46,7 +56,8 @@ still work.)
 
 ```bash
 agent-mail notify --project <dir> --message <text> [--from <label>]
-agent-mail inbox [--project <dir>] [--limit N]
+agent-mail inbox [--project <dir>] [--limit N] [--unread]
+agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
 agent-mail listeners                  # live sessions
 agent-mail start|stop|restart|status  # daemon (launchd-aware)
 agent-mail graceful                   # SIGHUP: reload config
@@ -72,9 +83,10 @@ Slack webhook resolution order: `AGENT_MAIL_SLACK_WEBHOOK` env var →
 | Endpoint | Description |
 |---|---|
 | `POST /notify` | `{project, message, from?, meta?}` → spool + Slack echo |
+| `POST /read` | `{project, ids}` or `{project, all:true}` → mark messages read |
 | `GET /health` | liveness + config summary |
 | `GET /registry` | live channel-server registrations |
-| `GET /inbox?project=<path>&limit=N` | read a project's spool |
+| `GET /inbox?project=<path>&limit=N&unread=1` | read a project's spool |
 
 ## Security note
 

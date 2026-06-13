@@ -3,9 +3,10 @@
  *
  * Endpoints (127.0.0.1 only):
  *   POST /notify   {project, from, message, meta?} -> append spool, echo Slack
+ *   POST /read     {project, ids?} or {project, all:true} -> mark read
  *   GET  /health   daemon liveness + config summary
  *   GET  /registry live channel-server registrations
- *   GET  /inbox?project=<path>&limit=N  read a project's spool
+ *   GET  /inbox?project=<path>&limit=N&unread=1  read a project's spool
  *
  * SIGTERM: graceful stop. SIGHUP: reload config (Slack webhook, echo mode).
  */
@@ -14,7 +15,13 @@ import { appendFileSync, writeFileSync } from "node:fs";
 import { type Config, loadConfig } from "./config.ts";
 import { LOG_PATH, PID_PATH, canonicalProject, ensureDirs } from "./paths.ts";
 import { listLive } from "./registry.ts";
-import { type Message, appendMessage, readMessages } from "./spool.ts";
+import {
+  type Message,
+  appendMessage,
+  markAllMessagesRead,
+  markMessagesRead,
+  readMessages,
+} from "./spool.ts";
 
 let config: Config = loadConfig();
 
@@ -74,7 +81,10 @@ const server = Bun.serve({
       const project = url.searchParams.get("project");
       if (!project) return json({ error: "missing ?project=" }, 400);
       const limit = Number(url.searchParams.get("limit") ?? 20);
-      return json(readMessages(canonicalProject(project), limit));
+      const unread = url.searchParams.get("unread") === "1";
+      return json(
+        readMessages(canonicalProject(project), { limit, unreadOnly: unread }),
+      );
     }
 
     if (req.method === "POST" && url.pathname === "/notify") {
@@ -101,6 +111,25 @@ const server = Bun.serve({
       // fall back to a direct spool append and double-deliver).
       echoToSlack(msg).catch((err) => log(`slack echo error: ${err}`));
       return json({ ok: true, spool: path });
+    }
+
+    if (req.method === "POST" && url.pathname === "/read") {
+      let body: { project?: string; ids?: unknown; all?: unknown };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return json({ error: "invalid JSON body" }, 400);
+      }
+      if (!body.project) return json({ error: "required field: project" }, 400);
+      const project = canonicalProject(body.project);
+      if (body.all === true) {
+        return json({ ok: true, marked: markAllMessagesRead(project) });
+      }
+      if (!Array.isArray(body.ids)) {
+        return json({ error: "required field: ids array or all=true" }, 400);
+      }
+      const ids = body.ids.filter((id): id is string => typeof id === "string");
+      return json({ ok: true, marked: markMessagesRead(project, ids) });
     }
 
     return json({ error: "not found" }, 404);

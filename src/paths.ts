@@ -2,6 +2,7 @@
  *
  * State root: ~/.claude/agent-mail/
  *   inbox/<slug>.jsonl     per-project message spools (source of truth)
+ *   read/<slug>.json        per-project read message ids
  *   registry/<id>.json     live channel-server registrations
  *   daemon.pid, daemon.log daemon state
  * Config:     ~/.config/agent-mail/config.toml
@@ -14,6 +15,7 @@ import { join, resolve } from "node:path";
 
 export const STATE_DIR = join(homedir(), ".claude", "agent-mail");
 export const INBOX_DIR = join(STATE_DIR, "inbox");
+export const READ_DIR = join(STATE_DIR, "read");
 export const REGISTRY_DIR = join(STATE_DIR, "registry");
 export const CONFIG_DIR = join(homedir(), ".config", "agent-mail");
 export const CONFIG_PATH = join(CONFIG_DIR, "config.toml");
@@ -24,7 +26,13 @@ export const DEFAULT_PORT = 8377;
 export const LAUNCHD_LABEL = "com.osteele.agent-mail";
 
 export function ensureDirs(): void {
-  for (const dir of [STATE_DIR, INBOX_DIR, REGISTRY_DIR, CONFIG_DIR]) {
+  for (const dir of [
+    STATE_DIR,
+    INBOX_DIR,
+    READ_DIR,
+    REGISTRY_DIR,
+    CONFIG_DIR,
+  ]) {
     mkdirSync(dir, { recursive: true });
   }
 }
@@ -45,4 +53,8 @@ export function projectSlug(project: string): string {
 
 export function spoolPath(project: string): string {
   return join(INBOX_DIR, `${projectSlug(project)}.jsonl`);
+}
+
+export function readStatePath(project: string): string {
+  return join(READ_DIR, `${projectSlug(project)}.json`);
 }

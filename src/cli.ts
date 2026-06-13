@@ -3,7 +3,8 @@
  *
  * Messaging:
  *   agent-mail notify --project <dir> --message <text> [--from <label>]
- *   agent-mail inbox [--project <dir>] [--limit N]
+ *   agent-mail inbox [--project <dir>] [--limit N] [--unread]
+ *   agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
  *   agent-mail listeners
  *
  * Daemon management (launchd-aware: uses launchctl when the LaunchAgent is
@@ -29,7 +30,24 @@ import {
   ensureDirs,
 } from "./paths.ts";
 import { listLive } from "./registry.ts";
-import { knownProjects, readMessages } from "./spool.ts";
+import { claudeSessions } from "./sessions.ts";
+import {
+  knownProjects,
+  markAllMessagesRead,
+  markMessagesRead,
+  readMessages,
+} from "./spool.ts";
+
+/** Best-effort human label for a registry entry: fresh Claude Code name, then
+ * the registered snapshot, then a short session id. */
+function sessionLabel(
+  r: { sessionId?: string; name?: string },
+  names = claudeSessions(),
+): string {
+  const name = (r.sessionId && names.get(r.sessionId)?.name) ?? r.name;
+  if (name) return name;
+  return r.sessionId ? `session ${r.sessionId.slice(0, 8)}` : "unnamed";
+}
 
 const SRC_DIR = dirname(new URL(import.meta.url).pathname);
 const DAEMON_TS = join(SRC_DIR, "daemon.ts");
@@ -172,8 +190,10 @@ async function cmdStatus(): Promise<void> {
     }
   }
   const live = listLive();
+  const names = claudeSessions();
   console.log(`listening sessions: ${live.length}`);
-  for (const r of live) console.log(`  ${r.cwd} (pid ${r.pid})`);
+  for (const r of live)
+    console.log(`  ${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid})`);
 }
 
 function cmdLogs(follow: boolean): void {
@@ -279,14 +299,39 @@ function cmdInbox(flags: Record<string, string | boolean>): void {
       ? resolveProjectArg(flags.project)
       : canonicalProject(process.cwd());
   const limit = typeof flags.limit === "string" ? Number(flags.limit) : 20;
-  const messages = readMessages(project, limit);
+  const messages = readMessages(project, {
+    limit,
+    unreadOnly: flags.unread === true,
+  });
   if (messages.length === 0) {
     console.log("inbox empty");
     return;
   }
   for (const m of messages) {
-    console.log(`[${m.ts}] from ${m.from}: ${m.message}`);
+    console.log(
+      `${m.id} ${m.read ? "read" : "unread"} [${m.ts}] from ${m.from}: ${m.message}`,
+    );
   }
+}
+
+function cmdMarkRead(flags: Record<string, string | boolean>): void {
+  const project =
+    typeof flags.project === "string"
+      ? resolveProjectArg(flags.project)
+      : canonicalProject(process.cwd());
+  if (flags.all === true) {
+    console.log(`marked ${markAllMessagesRead(project)} message(s) read`);
+    return;
+  }
+  if (typeof flags.id !== "string") {
+    console.error(
+      "usage: agent-mail mark-read [--project <dir>] (--id <message-id> | --all)",
+    );
+    process.exit(1);
+  }
+  console.log(
+    `marked ${markMessagesRead(project, [flags.id])} message(s) read`,
+  );
 }
 
 function cmdListeners(): void {
@@ -295,8 +340,11 @@ function cmdListeners(): void {
     console.log("no sessions listening");
     return;
   }
+  const names = claudeSessions();
   for (const r of live) {
-    console.log(`${r.cwd} (pid ${r.pid}, since ${r.started})`);
+    console.log(
+      `${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid}, since ${r.started})`,
+    );
   }
 }
 
@@ -416,6 +464,9 @@ switch (cmd) {
     break;
   case "inbox":
     cmdInbox(flags);
+    break;
+  case "mark-read":
+    cmdMarkRead(flags);
     break;
   case "listeners":
     cmdListeners();

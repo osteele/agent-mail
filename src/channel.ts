@@ -7,12 +7,13 @@
  *   `--dangerously-load-development-channels server:agent-mail` during the
  *   channels research preview; without the flag this is an inert MCP server
  *   whose tools still work.)
- * - Registers {cwd, pid} in the registry so peers and the daemon can see
- *   which sessions are listening.
- * - Tools: send_mail (message another project via the daemon, falling back
- *   to a direct spool append) and check_inbox (read this project's spool).
+ * - Registers {cwd, pid, sessionId, name} in the registry so peers and the
+ *   daemon can see which sessions are listening (sessionId from
+ *   CLAUDE_CODE_SESSION_ID; name from Claude Code's session metadata).
+ * - Tools: send_mail, list_sessions, check_inbox, and mark_read.
  */
 
+import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -22,12 +23,63 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { loadConfig } from "./config.ts";
 import { canonicalProject, ensureDirs, spoolPath } from "./paths.ts";
-import { register, unregister } from "./registry.ts";
-import { type Message, appendMessage, readMessages } from "./spool.ts";
+import { listLive, register, unregister } from "./registry.ts";
+import { claudeSessions, sessionName } from "./sessions.ts";
+import {
+  type Message,
+  appendMessage,
+  markAllMessagesRead,
+  markMessagesRead,
+  readMessages,
+} from "./spool.ts";
 
 const cwd = canonicalProject(process.cwd());
+// Per-session identifier. Claude Code sets CLAUDE_CODE_SESSION_ID in the MCP
+// server's environment (correlates to the transcript filename and `--resume`);
+// fall back to a constructed id for older Claude Code versions that don't.
+// Used to distinguish multiple sessions in the same directory (which share one
+// spool) and to suppress self-echo of our own outgoing mail.
+const sessionId = process.env.CLAUDE_CODE_SESSION_ID ?? randomUUID();
+const myName = sessionName(sessionId);
+const selfLabel = myName ? `${myName} (${sessionId})` : sessionId;
 const config = loadConfig();
 const mySpool = spoolPath(cwd);
+
+/** Live sessions (pid-pruned registry), enriched with fresh Claude Code names.
+ * Only entries with a known sessionId are returned — older sessions that
+ * predate CLAUDE_CODE_SESSION_ID can't be addressed individually. */
+function liveSessions(dir?: string): {
+  sessionId: string;
+  cwd: string;
+  name?: string;
+  status?: string;
+  pid: number;
+}[] {
+  const meta = claudeSessions();
+  return listLive()
+    .filter((r) => r.sessionId && (!dir || canonicalProject(r.cwd) === dir))
+    .map((r) => {
+      const sid = r.sessionId as string;
+      return {
+        sessionId: sid,
+        cwd: canonicalProject(r.cwd),
+        name: meta.get(sid)?.name ?? r.name,
+        status: meta.get(sid)?.status,
+        pid: r.pid,
+      };
+    });
+}
+
+function describeSessions(
+  sessions: { sessionId: string; name?: string; status?: string }[],
+): string {
+  return sessions
+    .map(
+      (s) =>
+        `  - ${s.name ? `${s.name} ` : ""}${s.sessionId}${s.status ? ` [${s.status}]` : ""}`,
+    )
+    .join("\n");
+}
 
 const mcp = new Server(
   { name: "agent-mail", version: "0.1.0" },
@@ -36,14 +88,7 @@ const mcp = new Server(
       experimental: { "claude/channel": {} },
       tools: {},
     },
-    instructions:
-      "agent-mail is the local mail bus between Claude Code sessions and " +
-      "tools like weft. Inbound messages arrive as " +
-      '<channel source="agent-mail" from="..." ts="...">; read them and act ' +
-      "(job-completion notices from weft usually mean: process the job's " +
-      "results). To message another project's agent, call send_mail with " +
-      "the target project directory. check_inbox reads this project's " +
-      "recent mail, e.g. at session start.",
+    instructions: `Local mail between coding agents. You are session ${selfLabel} in ${cwd}. Use check_inbox for recent/unread mail, mark_read after acting, and send_mail to contact another project. Multiple sessions in one directory share an inbox; to reach a specific one, pass its name or id as \`session\` to send_mail, and use list_sessions to discover targets.`,
   },
 );
 
@@ -52,9 +97,9 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "send_mail",
       description:
-        "Send a message to another project's agent-mail inbox (delivered " +
-        "live if a session is listening there, spooled otherwise; echoed " +
-        "to Slack).",
+        "Send a message to another project's agent-mail inbox. By default " +
+        "every session in the target directory sees it; pass `session` to " +
+        "address one specific session.",
       inputSchema: {
         type: "object",
         properties: {
@@ -63,8 +108,29 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: "Target project directory (absolute path)",
           },
           message: { type: "string", description: "The message" },
+          session: {
+            type: "string",
+            description:
+              "Optional: name or id of a specific session in the target " +
+              "directory (see list_sessions). Omit to reach all sessions there.",
+          },
         },
         required: ["project", "message"],
+      },
+    },
+    {
+      name: "list_sessions",
+      description:
+        "List live agent sessions (mail targets) and their names/ids. " +
+        "Optionally scope to one project directory.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project: {
+            type: "string",
+            description: "Optional: only list sessions in this directory",
+          },
+        },
       },
     },
     {
@@ -76,6 +142,28 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           limit: {
             type: "number",
             description: "Max messages to return (default 20)",
+          },
+          unread: {
+            type: "boolean",
+            description: "Only return unread messages",
+          },
+        },
+      },
+    },
+    {
+      name: "mark_read",
+      description: "Mark this project's agent-mail messages read.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          ids: {
+            type: "array",
+            items: { type: "string" },
+            description: "Message ids to mark read",
+          },
+          all: {
+            type: "boolean",
+            description: "Mark all current messages read",
           },
         },
       },
@@ -102,32 +190,120 @@ async function deliver(msg: Message): Promise<string> {
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === "send_mail") {
-    const { project, message } = req.params.arguments as {
+    const { project, message, session } = req.params.arguments as {
       project: string;
       message: string;
+      session?: string;
     };
+    const target = canonicalProject(project);
+    const meta: Record<string, string> = { sessionId };
+    if (myName) meta.fromName = myName;
+    if (session) {
+      const peers = liveSessions(target);
+      const matches = peers.filter(
+        (p) => p.sessionId === session || p.name === session,
+      );
+      if (matches.length === 0) {
+        const tail = peers.length
+          ? `Live sessions in that directory:\n${describeSessions(peers)}`
+          : "No sessions are listening in that directory.";
+        return {
+          content: [
+            {
+              type: "text",
+              text: `no live session "${session}" in ${target}. ${tail}`,
+            },
+          ],
+        };
+      }
+      if (matches.length > 1) {
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                `"${session}" is ambiguous — multiple sessions match; ` +
+                `resend with the exact id:\n${describeSessions(matches)}`,
+            },
+          ],
+        };
+      }
+      meta.toSession = matches[0].sessionId;
+    }
     const status = await deliver({
       ts: new Date().toISOString(),
       from: cwd,
-      project: canonicalProject(project),
+      project: target,
       message,
+      meta,
     });
     return { content: [{ type: "text", text: status }] };
   }
+  if (req.params.name === "list_sessions") {
+    const { project } = (req.params.arguments ?? {}) as { project?: string };
+    const dir = project ? canonicalProject(project) : undefined;
+    const sessions = liveSessions(dir);
+    return {
+      content: [
+        {
+          type: "text",
+          text: sessions.length
+            ? sessions
+                .map(
+                  (s) =>
+                    `${s.name ? `${s.name} ` : ""}${s.sessionId} — ${s.cwd}${s.status ? ` [${s.status}]` : ""}${s.sessionId === sessionId ? " (you)" : ""}`,
+                )
+                .join("\n")
+            : "no sessions listening",
+        },
+      ],
+    };
+  }
   if (req.params.name === "check_inbox") {
-    const { limit } = (req.params.arguments ?? {}) as { limit?: number };
-    const messages = readMessages(cwd, limit ?? 20);
+    const { limit, unread } = (req.params.arguments ?? {}) as {
+      limit?: number;
+      unread?: boolean;
+    };
+    const messages = readMessages(cwd, {
+      limit: limit ?? 20,
+      unreadOnly: unread ?? false,
+    });
     return {
       content: [
         {
           type: "text",
           text: messages.length
             ? messages
-                .map((m) => `[${m.ts}] from ${m.from}: ${m.message}`)
+                .map((m) => {
+                  const sender =
+                    m.meta?.fromName ?? m.meta?.sessionId?.slice(0, 8);
+                  const tag = sender ? ` [${sender}]` : "";
+                  const direct =
+                    m.meta?.toSession === sessionId ? " (to you)" : "";
+                  return `${m.id} ${m.read ? "read" : "unread"} [${m.ts}] from ${m.from}${tag}${direct}: ${m.message}`;
+                })
                 .join("\n")
             : "inbox empty",
         },
       ],
+    };
+  }
+  if (req.params.name === "mark_read") {
+    const { ids, all } = (req.params.arguments ?? {}) as {
+      ids?: string[];
+      all?: boolean;
+    };
+    let count: number;
+    if (all === true) {
+      count = markAllMessagesRead(cwd);
+    } else {
+      if (!Array.isArray(ids)) {
+        throw new Error("mark_read requires ids or all=true");
+      }
+      count = markMessagesRead(cwd, ids);
+    }
+    return {
+      content: [{ type: "text", text: `marked ${count} message(s) read` }],
     };
   }
   throw new Error(`unknown tool: ${req.params.name}`);
@@ -136,7 +312,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
 await mcp.connect(new StdioServerTransport());
 
 ensureDirs();
-register(cwd, process.pid);
+register(cwd, process.pid, sessionId, myName);
 
 // --- Spool watcher: push lines appended after startup -----------------------
 let offset = existsSync(mySpool) ? statSync(mySpool).size : 0;
@@ -156,6 +332,12 @@ async function poll(): Promise<void> {
     } catch {
       continue;
     }
+    // Skip our own mail: same directory shares one spool, so a message we sent
+    // to this project would otherwise be pushed back into our own session.
+    if (msg.meta?.sessionId === sessionId) continue;
+    // Honor session-targeted mail: a message addressed to another session in
+    // this shared-spool directory is not for us.
+    if (msg.meta?.toSession && msg.meta.toSession !== sessionId) continue;
     await mcp.notification({
       method: "notifications/claude/channel",
       params: {
