@@ -21,6 +21,8 @@ export const CONFIG_DIR = join(homedir(), ".config", "agent-mail");
 export const CONFIG_PATH = join(CONFIG_DIR, "config.toml");
 export const PID_PATH = join(STATE_DIR, "daemon.pid");
 export const LOG_PATH = join(STATE_DIR, "daemon.log");
+/** Persisted {channel, ts} of the editable Slack dashboard message. */
+export const SLACK_DASHBOARD_PATH = join(STATE_DIR, "slack-dashboard.json");
 
 export const DEFAULT_PORT = 8377;
 export const LAUNCHD_LABEL = "com.osteele.agent-mail";

@@ -2,8 +2,9 @@
 
 Local mail bus for Claude Code agents. Push messages into running sessions
 (via the Claude Code [channels](https://code.claude.com/docs/en/channels)
-research preview), spool them durably when no session is listening, and echo
-everything to Slack.
+research preview), spool them durably when no session is listening, thread
+replies into conversations, echo everything to Slack, and visualize the traffic
+in a web or Slack dashboard.
 
 Senders: other agents, the CLI, and tools like [weft](../weft) (job-completion
 notifications).
@@ -21,6 +22,10 @@ notifications).
   work even without channel push.
 - **Registry** (`~/.claude/agent-mail/registry/`): which sessions are
   listening (`cwd`, `pid`, `sessionId`, `name`), pruned by pid liveness.
+- **Dashboards** (`src/dashboard.ts`, `src/slackDashboard.ts`): read the spools
+  and registry directly (no daemon dependency) via a shared aggregation
+  (`src/dashboardData.ts`) and render them as a local web page or an editable
+  Slack message.
 
 ### Addressing
 
@@ -34,6 +39,14 @@ session name (set via `/rename`) when available.
 Delivery tiers: channel-enabled sessions get push; running sessions without
 the flag can arm a Monitor on their spool file; everything else reads the
 spool on next check (`agent-mail inbox` or the `check_inbox` tool).
+
+### Threads
+
+To answer a message, pass its id as `reply_to` to the `send_mail` tool (ids are
+shown by `check_inbox`), or `--reply-to <id>` on `agent-mail notify`. The reply
+inherits the original's thread, inbox readbacks mark it with `↩`, and the Slack
+echo quotes the parent inline. Every message carries a `threadId` (a root
+message is its own thread) so conversations group uniformly.
 
 ## Setup
 
@@ -55,15 +68,31 @@ still work.)
 ## CLI
 
 ```bash
-agent-mail notify --project <dir> --message <text> [--from <label>]
+agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to <id>]
 agent-mail inbox [--project <dir>] [--limit N] [--unread]
 agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
 agent-mail listeners                  # live sessions
+agent-mail dashboard [--port N] [--open] [--no-tui]   # web dashboard
+agent-mail slack-dashboard [--watch <seconds>]        # editable Slack dashboard
 agent-mail start|stop|restart|status  # daemon (launchd-aware)
 agent-mail graceful                   # SIGHUP: reload config
 agent-mail logs [-f]
 agent-mail install|uninstall
 ```
+
+## Dashboards
+
+`agent-mail dashboard` serves a local web page (default port = daemon port + 1)
+showing live sessions, sender→recipient traffic, hourly volume, and a flight
+log, polling every 2 s. In a terminal it stays attached: press `o` to (re)open
+it in the browser, `q` to quit. Pass `--open` to open the browser on start, or
+`--no-tui` to just serve (for scripts/headless). It reads spools directly, so it
+works even when the daemon is down.
+
+`agent-mail slack-dashboard` posts the same summary as a single Slack message
+and edits it in place on each run (`--watch <seconds>` to refresh on a timer).
+This needs a Slack **bot token** (the incoming webhook used for per-message
+echoes can't edit messages) — see Configuration.
 
 ## Configuration
 
@@ -73,10 +102,18 @@ agent-mail install|uninstall
 port = 8377
 # slack_webhook = "https://hooks.slack.com/services/..."
 # slack_echo = "all"   # or "none"
+# slack_bot_token = "xoxb-..."   # for `slack-dashboard` (chat:write scope)
+# slack_channel = "C0123ABCD"    # channel the dashboard posts/updates in
 ```
 
 Slack webhook resolution order: `AGENT_MAIL_SLACK_WEBHOOK` env var →
 `slack_webhook` in config.toml → `SLACK_WEBHOOK` in `~/.config/weft/config`.
+
+The `slack-dashboard` command additionally needs a bot token and channel
+(`slack_bot_token` / `slack_channel`, or `AGENT_MAIL_SLACK_BOT_TOKEN` /
+`AGENT_MAIL_SLACK_CHANNEL`). Create a Slack app with the `chat:write` scope,
+install it, and invite the bot to the target channel. The per-message echo only
+needs the webhook; the editable dashboard needs the token.
 
 ## HTTP API (127.0.0.1 only)
 

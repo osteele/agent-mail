@@ -10,15 +10,15 @@ Slack echo renders a reply's parent inline as quoted context. It does **not**
 nest replies under the original Slack message, because that requires posting with
 `thread_ts`, which incoming webhooks can't do.
 
-To get true nested threads:
+The bot-token plumbing now exists (config `slack_bot_token` / `slack_channel`,
+the Web API helper in `slackDashboard.ts`), so the remaining work is small:
 
-- Add an optional Slack **bot token** + channel id to config (alongside the
-  existing webhook; webhook stays the zero-config default).
 - On echo via the Web API (`chat.postMessage`), persist a `threadId → Slack ts`
   mapping (a small JSON map under `~/.claude/agent-mail/`, consistent with the
   filesystem-is-the-bus invariant).
 - A reply whose `threadId` is already mapped posts with that `thread_ts`; a new
   thread records the returned `ts`.
+- Falls back to the current inline-quote echo when no bot token is configured.
 
 ## Presence
 
@@ -52,8 +52,29 @@ A handoff is a small state machine layered on the spool:
 Depends on **presence** (you can only hand off to a session known to be live)
 and reuses **threading** (a handoff and its accept/decline are one thread).
 
-## Visualization (exploratory)
+## Visualization
 
-Make the flow of mail between projects legible — historical traffic and a live
-view of who's talking to whom. Sketches live in chat for now; promote concrete
-directions here once chosen.
+The `dashboard` (web) and `slack-dashboard` commands already cover live
+presence, a sender→recipient traffic ranking, a flight log, and 24h volume.
+Building on the same `dashboardData` aggregation:
+
+- **Realtime stream** — a `/api/stream` SSE endpoint so the web dashboard
+  updates on append instead of polling; edges in a force-directed graph pulse as
+  messages fly (the "flight tracker").
+- **`agent-mail top`** — a pure-terminal live dashboard (presence + sparkline +
+  scrolling flight log) for when a browser isn't wanted.
+- **Chord diagram / adjacency matrix** — replace the ranked route list with a
+  matrix heatmap (scales past ~12 projects) or a chord diagram.
+- **Sankey** — sender → recipient flow with width proportional to volume.
+- **Stream graph** — stacked traffic over time banded by source type
+  (weft vs. agent↔agent vs. cli).
+- **Thread swimlanes** — each `threadId` a lane, messages as beads along time;
+  the message→reply gap is visible latency.
+- **Reply-latency leaderboard** — median message→reply time per project, derived
+  from `replyTo` + timestamps.
+- **Transcript reconstruction** — stitch both projects' spools for a `threadId`
+  into one ordered, sender-attributed conversation view.
+- **Historical replay** — a time scrubber that rebuilds the graph at any past
+  moment; click a message to read it.
+- **Statusline / menu-bar glyph** — unread count + a tiny traffic sparkline in
+  the Claude Code statusline or the macOS menu bar.

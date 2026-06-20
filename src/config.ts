@@ -13,6 +13,11 @@ export interface Config {
   slackWebhook: string | null;
   /** "all" echoes every message to Slack; "none" disables the echo. */
   slackEcho: "all" | "none";
+  /** Bot token (xoxb-...) for the Web API; enables the editable Slack
+   * dashboard (chat.update), which the incoming webhook can't do. */
+  slackBotToken: string | null;
+  /** Channel id the Slack dashboard posts/updates in (e.g. C0123ABCD). */
+  slackChannel: string | null;
 }
 
 /** Parse a flat TOML subset: `key = "string"` / `key = 123` lines, # comments. */
@@ -43,5 +48,9 @@ export function loadConfig(): Config {
   const slackWebhook =
     process.env.AGENT_MAIL_SLACK_WEBHOOK ?? raw.slack_webhook ?? null;
   const slackEcho = (raw.slack_echo ?? "all") === "none" ? "none" : "all";
-  return { port, slackWebhook, slackEcho };
+  const slackBotToken =
+    process.env.AGENT_MAIL_SLACK_BOT_TOKEN ?? raw.slack_bot_token ?? null;
+  const slackChannel =
+    process.env.AGENT_MAIL_SLACK_CHANNEL ?? raw.slack_channel ?? null;
+  return { port, slackWebhook, slackEcho, slackBotToken, slackChannel };
 }

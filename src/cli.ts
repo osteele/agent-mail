@@ -7,6 +7,10 @@
  *   agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
  *   agent-mail listeners
  *
+ * Dashboards:
+ *   agent-mail dashboard [--port N] [--open] [--no-tui]
+ *   agent-mail slack-dashboard [--watch <seconds>]
+ *
  * Daemon management (launchd-aware: uses launchctl when the LaunchAgent is
  * installed, bare pidfile mode otherwise):
  *   agent-mail start | stop | restart | graceful | status | logs [-f]
@@ -21,6 +25,7 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { loadConfig } from "./config.ts";
+import { openBrowser, serveDashboard } from "./dashboard.ts";
 import {
   CONFIG_PATH,
   LAUNCHD_LABEL,
@@ -32,6 +37,10 @@ import {
 } from "./paths.ts";
 import { listLive } from "./registry.ts";
 import { claudeSessions } from "./sessions.ts";
+import {
+  SlackDashboardUnconfigured,
+  refreshSlackDashboard,
+} from "./slackDashboard.ts";
 import {
   knownProjects,
   markAllMessagesRead,
@@ -407,6 +416,9 @@ function cmdInstall(): void {
       `port = ${loadConfig().port}`,
       '# slack_webhook = "https://hooks.slack.com/services/..." (falls back to ~/.config/weft/config)',
       '# slack_echo = "all"  # or "none"',
+      "# Editable Slack dashboard (agent-mail slack-dashboard) needs a bot token:",
+      '# slack_bot_token = "xoxb-..."  # chat:write scope; invite the bot to the channel',
+      '# slack_channel = "C0123ABCD"',
       "",
     ].join("\n");
     writeFileSync(CONFIG_PATH, configTemplate);
@@ -459,6 +471,89 @@ function cmdUninstall(): void {
   }
 }
 
+function cmdDashboard(flags: Record<string, string | boolean>): void {
+  const config = loadConfig();
+  const port =
+    typeof flags.port === "string" ? Number(flags.port) : config.port + 1;
+  const server = serveDashboard(port);
+  const url = `http://127.0.0.1:${server.port}/`;
+  console.log(`agent-mail dashboard → ${url}`);
+  if (flags.open === true) openBrowser(url);
+
+  // Single cleanup, idempotent, run on every exit path so the terminal never
+  // stays in raw mode.
+  let cleaned = false;
+  const cleanup = (): void => {
+    if (cleaned) return;
+    cleaned = true;
+    if (process.stdin.isTTY) process.stdin.setRawMode(false);
+    process.stdin.pause();
+    server.stop(true);
+  };
+  process.on("exit", cleanup);
+
+  if (!process.stdin.isTTY || flags["no-tui"] === true) {
+    console.log("serving; press Ctrl-C to stop");
+    for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+      process.on(sig, () => {
+        cleanup();
+        process.exit(0);
+      });
+    }
+    return; // keep-alive: the open server handle keeps the event loop running
+  }
+
+  console.log("press o to open in browser, q to quit");
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+  process.stdin.setEncoding("utf8");
+  process.stdin.on("data", (key: string) => {
+    // Raw mode suppresses SIGINT, so Ctrl-C (0x03) arrives as data.
+    if (key === "q" || key === "\u0003") {
+      cleanup();
+      process.stdout.write("\n");
+      process.exit(0);
+    } else if (key === "o") {
+      openBrowser(url);
+    }
+  });
+  for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.on(sig, () => {
+      cleanup();
+      process.exit(0);
+    });
+  }
+}
+
+async function cmdSlackDashboard(
+  flags: Record<string, string | boolean>,
+): Promise<void> {
+  const config = loadConfig();
+  const watch = typeof flags.watch === "string" ? Number(flags.watch) : 0;
+  try {
+    console.log(await refreshSlackDashboard(config));
+  } catch (err) {
+    if (err instanceof SlackDashboardUnconfigured) {
+      console.error(`${err.message}
+
+Set up a Slack app with a bot token (chat:write scope), invite it to the
+channel, then add to ${CONFIG_PATH}:
+  slack_bot_token = "xoxb-..."
+  slack_channel = "C0123ABCD"`);
+      process.exit(1);
+    }
+    throw err;
+  }
+  if (watch > 0) {
+    console.log(`refreshing every ${watch}s; press Ctrl-C to stop`);
+    setInterval(() => {
+      refreshSlackDashboard(config)
+        .then((s) => console.log(s))
+        .catch((e) => console.error(`refresh failed: ${e.message}`));
+    }, watch * 1000);
+  }
+}
+
 // --- dispatch -------------------------------------------------------------------
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -496,6 +591,12 @@ switch (cmd) {
   case "logs":
     cmdLogs(rest.includes("-f") || rest.includes("--follow"));
     break;
+  case "dashboard":
+    cmdDashboard(flags);
+    break;
+  case "slack-dashboard":
+    await cmdSlackDashboard(flags);
+    break;
   case "install":
     cmdInstall();
     break;
@@ -504,7 +605,7 @@ switch (cmd) {
     break;
   default:
     console.log(
-      "usage: agent-mail <notify|inbox|listeners|start|stop|restart|graceful|status|logs|install|uninstall>",
+      "usage: agent-mail <notify|inbox|listeners|dashboard|slack-dashboard|start|stop|restart|graceful|status|logs|install|uninstall>",
     );
     process.exit(cmd ? 1 : 0);
 }

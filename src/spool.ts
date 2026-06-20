@@ -121,6 +121,36 @@ export function readMessages(
   return limit > 0 ? out.slice(-limit) : out;
 }
 
+/** Every message across every project spool, oldest-first. For dashboards and
+ * cross-project aggregation; per-project read-state is applied. */
+export function readAllMessages(): StoredMessage[] {
+  ensureDirs();
+  const out: StoredMessage[] = [];
+  for (const name of readdirSync(INBOX_DIR)) {
+    if (!name.endsWith(".jsonl")) continue;
+    const lines = readFileSync(join(INBOX_DIR, name), "utf8")
+      .split("\n")
+      .filter(Boolean);
+    const readByProject = new Map<string, Set<string>>();
+    for (const line of lines) {
+      try {
+        const msg = JSON.parse(line) as Message;
+        const id = msg.id ?? fallbackMessageId(line);
+        let read = readByProject.get(msg.project);
+        if (!read) {
+          read = readIds(msg.project);
+          readByProject.set(msg.project, read);
+        }
+        out.push({ ...msg, id, read: read.has(id) });
+      } catch {
+        // Skip corrupt/torn lines, consistent with readMessages.
+      }
+    }
+  }
+  out.sort((a, b) => a.ts.localeCompare(b.ts));
+  return out;
+}
+
 export function markMessagesRead(project: string, ids: string[]): number {
   const messages = readMessages(project, { limit: 0 });
   const available = new Set(messages.map((msg) => msg.id));
