@@ -49,14 +49,18 @@ import {
 } from "./spool.ts";
 
 /** Best-effort human label for a registry entry: fresh Claude Code name, then
- * the registered snapshot, then a short session id. */
+ * the registered snapshot, then `<client> <short id>` (so a nameless Codex
+ * session reads "codex 1a2b3c4d" rather than an anonymous id). */
 function sessionLabel(
-  r: { sessionId?: string; name?: string },
+  r: { sessionId?: string; name?: string; client?: string },
   names = claudeSessions(),
 ): string {
   const name = (r.sessionId && names.get(r.sessionId)?.name) ?? r.name;
   if (name) return name;
-  return r.sessionId ? `session ${r.sessionId.slice(0, 8)}` : "unnamed";
+  const kind = r.client ?? "session";
+  return r.sessionId
+    ? `${kind} ${r.sessionId.slice(0, 8)}`
+    : (r.client ?? "unnamed");
 }
 
 const SRC_DIR = dirname(new URL(import.meta.url).pathname);

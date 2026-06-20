@@ -12,9 +12,10 @@ import { REGISTRY_DIR, ensureDirs, projectSlug } from "./paths.ts";
 
 export interface Registration {
   cwd: string;
-  pid: number; // channel-server process; dies with the Claude Code session
-  sessionId?: string; // Claude Code session UUID, when known
+  pid: number; // channel-server process; dies with the host session
+  sessionId?: string; // host session id (Claude Code's; a random uuid under Codex)
   name?: string; // session name snapshot at register time (may go stale on rename)
+  client?: string; // host client from MCP clientInfo: "claude-code", "codex", ...
   started: string; // ISO 8601
 }
 
@@ -27,15 +28,28 @@ export function register(
   pid: number,
   sessionId?: string,
   name?: string,
+  client?: string,
 ): string {
   ensureDirs();
   const path = entryPath(cwd, pid);
+  // Preserve the original start time across the post-initialize re-register
+  // (which adds the client once the MCP handshake reveals it).
+  let started = new Date().toISOString();
+  if (existsSync(path)) {
+    try {
+      const prev = JSON.parse(readFileSync(path, "utf8")) as Registration;
+      if (typeof prev.started === "string") started = prev.started;
+    } catch {
+      // corrupt prior entry; keep the fresh timestamp
+    }
+  }
   const entry: Registration = {
     cwd,
     pid,
     ...(sessionId ? { sessionId } : {}),
     ...(name ? { name } : {}),
-    started: new Date().toISOString(),
+    ...(client ? { client } : {}),
+    started,
   };
   writeFileSync(path, JSON.stringify(entry, null, 1));
   return path;

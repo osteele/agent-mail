@@ -1,15 +1,17 @@
 #!/usr/bin/env bun
-/** agent-mail channel server: spawned by Claude Code per session (stdio MCP).
+/** agent-mail channel server: spawned by the host (Claude Code or Codex) per
+ * session over stdio as an MCP server.
  *
  * - Declares the `claude/channel` capability; new spool lines for this
  *   session's project are pushed into the session as <channel> events.
  *   (Push requires launching Claude Code with
  *   `--dangerously-load-development-channels server:agent-mail` during the
- *   channels research preview; without the flag this is an inert MCP server
- *   whose tools still work.)
- * - Registers {cwd, pid, sessionId, name} in the registry so peers and the
- *   daemon can see which sessions are listening (sessionId from
- *   CLAUDE_CODE_SESSION_ID; name from Claude Code's session metadata).
+ *   channels research preview; Codex has no channel push, but the tools work.)
+ * - Registers {cwd, pid, sessionId, name, client} in the registry so peers and
+ *   the daemon can see which sessions are listening. sessionId comes from
+ *   CLAUDE_CODE_SESSION_ID (Codex sets no session env var, so it falls back to a
+ *   per-process random uuid); name from Claude Code's session metadata; client
+ *   ("claude-code"/"codex") from the MCP clientInfo once the handshake lands.
  * - Tools: send_mail, list_sessions, check_inbox, and mark_read.
  */
 
@@ -58,6 +60,7 @@ function liveSessions(dir?: string): {
   cwd: string;
   name?: string;
   status?: string;
+  client?: string;
   pid: number;
 }[] {
   const meta = claudeSessions();
@@ -70,6 +73,7 @@ function liveSessions(dir?: string): {
         cwd: canonicalProject(r.cwd),
         name: meta.get(sid)?.name ?? r.name,
         status: meta.get(sid)?.status,
+        client: r.client,
         pid: r.pid,
       };
     });
@@ -82,12 +86,17 @@ function preview(text: string, max = 140): string {
 }
 
 function describeSessions(
-  sessions: { sessionId: string; name?: string; status?: string }[],
+  sessions: {
+    sessionId: string;
+    name?: string;
+    status?: string;
+    client?: string;
+  }[],
 ): string {
   return sessions
     .map(
       (s) =>
-        `  - ${s.name ? `${s.name} ` : ""}${s.sessionId}${s.status ? ` [${s.status}]` : ""}`,
+        `  - ${s.name ? `${s.name} ` : ""}${s.sessionId}${s.client ? ` <${s.client}>` : ""}${s.status ? ` [${s.status}]` : ""}`,
     )
     .join("\n");
 }
@@ -288,7 +297,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             ? sessions
                 .map(
                   (s) =>
-                    `${s.name ? `${s.name} ` : ""}${s.sessionId} — ${s.cwd}${s.status ? ` [${s.status}]` : ""}${s.sessionId === sessionId ? " (you)" : ""}`,
+                    `${s.name ? `${s.name} ` : ""}${s.sessionId}${s.client ? ` <${s.client}>` : ""} — ${s.cwd}${s.status ? ` [${s.status}]` : ""}${s.sessionId === sessionId ? " (you)" : ""}`,
                 )
                 .join("\n")
             : "no sessions listening",
@@ -346,6 +355,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
   throw new Error(`unknown tool: ${req.params.name}`);
 });
+
+// Once the client completes the MCP handshake, its clientInfo tells us which
+// host we're under ("claude-code", "codex", ...). Re-register with it; this is
+// the only reliable claude-vs-codex signal, since Codex sets no session env var.
+mcp.oninitialized = () => {
+  const client = mcp.getClientVersion()?.name;
+  if (client) register(cwd, process.pid, sessionId, myName, client);
+};
 
 await mcp.connect(new StdioServerTransport());
 

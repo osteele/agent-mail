@@ -61,6 +61,8 @@ const PAGE = String.raw`<!doctype html>
   .vol { display: flex; align-items: flex-end; gap: 2px; height: 64px; }
   .vol .b { flex: 1; background: #238636; border-radius: 1px 1px 0 0; min-height: 1px; }
   .thread { color: #d29922; }
+  .client { font-size: 11px; color: #8b949e; border: 1px solid #30363d;
+            border-radius: 10px; padding: 0 7px; }
   .empty { color: #6e7681; font-style: italic; }
 </style>
 </head>
@@ -113,6 +115,7 @@ function render(s) {
   $("presence").innerHTML = s.presence.length
     ? s.presence.map((p) =>
         '<div class="row"><span class="dot"></span><b>' + esc(p.project) + '</b>' +
+        (p.client ? ' <span class="client">' + esc(p.client) + '</span>' : '') +
         (p.name ? ' <span class="muted">' + esc(p.name) + '</span>' : '') +
         (p.status ? ' <span class="muted">[' + esc(p.status) + ']</span>' : '') +
         '</div>').join("")
