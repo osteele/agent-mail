@@ -1,16 +1,15 @@
 /** JSONL message spools: one append-only file per project. */
 
 import { createHash, randomUUID } from "node:crypto";
-import {
-  appendFileSync,
-  existsSync,
-  readFileSync,
-  readdirSync,
-  renameSync,
-  writeFileSync,
-} from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { INBOX_DIR, ensureDirs, readStatePath, spoolPath } from "./paths.ts";
+import {
+  INBOX_DIR,
+  ensureDirs,
+  legacyReadStatePath,
+  readStatePath,
+  spoolPath,
+} from "./paths.ts";
 
 export interface Message {
   id?: string;
@@ -70,29 +69,41 @@ function fallbackMessageId(line: string): string {
   return createHash("sha256").update(line).digest("hex").slice(0, 16);
 }
 
+/** Read ids = the union of the append-only log plus any legacy JSON file. The
+ * union is order- and duplicate-insensitive, which is what makes concurrent
+ * appends safe: two markers can't clobber each other's marks. */
 function readIds(project: string): Set<string> {
+  const ids = new Set<string>();
   const path = readStatePath(project);
-  if (!existsSync(path)) return new Set();
-  let doc: { read?: unknown };
-  try {
-    doc = JSON.parse(readFileSync(path, "utf8")) as { read?: unknown };
-  } catch (err) {
-    if (!(err instanceof SyntaxError)) throw err;
-    return new Set();
+  if (existsSync(path)) {
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      const id = line.trim();
+      if (id) ids.add(id);
+    }
   }
-  if (!Array.isArray(doc.read)) return new Set();
-  return new Set(doc.read.filter((id): id is string => typeof id === "string"));
+  const legacy = legacyReadStatePath(project);
+  if (existsSync(legacy)) {
+    try {
+      const doc = JSON.parse(readFileSync(legacy, "utf8")) as {
+        read?: unknown;
+      };
+      if (Array.isArray(doc.read)) {
+        for (const id of doc.read) if (typeof id === "string") ids.add(id);
+      }
+    } catch (err) {
+      if (!(err instanceof SyntaxError)) throw err;
+    }
+  }
+  return ids;
 }
 
-function writeIds(project: string, ids: Set<string>): void {
+/** Append read ids to the log. A single appendFileSync is one O_APPEND write,
+ * atomic against concurrent appenders for the small batches we mark at a time;
+ * duplicates (two processes marking the same id) are harmless — readIds dedups. */
+function appendReadIds(project: string, ids: string[]): void {
+  if (ids.length === 0) return;
   ensureDirs();
-  const path = readStatePath(project);
-  const tmpPath = `${path}.${process.pid}.tmp`;
-  writeFileSync(
-    tmpPath,
-    `${JSON.stringify({ read: [...ids].sort() }, null, 1)}\n`,
-  );
-  renameSync(tmpPath, path);
+  appendFileSync(readStatePath(project), ids.map((id) => `${id}\n`).join(""));
 }
 
 export function readMessages(
@@ -152,23 +163,27 @@ export function readAllMessages(): StoredMessage[] {
 }
 
 export function markMessagesRead(project: string, ids: string[]): number {
-  const messages = readMessages(project, { limit: 0 });
-  const available = new Set(messages.map((msg) => msg.id));
+  const available = new Set(
+    readMessages(project, { limit: 0 }).map((msg) => msg.id),
+  );
   const read = readIds(project);
-  let changed = 0;
+  const toAdd: string[] = [];
   for (const id of ids) {
+    // The read check only avoids redundant appends; correctness comes from the
+    // union on read, not from this snapshot, so a concurrent marker can't race us.
     if (!available.has(id) || read.has(id)) continue;
     read.add(id);
-    changed++;
+    toAdd.push(id);
   }
-  if (changed > 0) writeIds(project, read);
-  return changed;
+  appendReadIds(project, toAdd);
+  return toAdd.length;
 }
 
 export function markAllMessagesRead(project: string): number {
-  const messages = readMessages(project, { limit: 0, unreadOnly: true });
-  const read = readIds(project);
-  for (const msg of messages) read.add(msg.id);
-  if (messages.length > 0) writeIds(project, read);
-  return messages.length;
+  const unread = readMessages(project, { limit: 0, unreadOnly: true });
+  appendReadIds(
+    project,
+    unread.map((msg) => msg.id),
+  );
+  return unread.length;
 }

@@ -64,6 +64,14 @@ export function spoolPath(project: string): string {
   return join(INBOX_DIR, `${projectSlug(project)}.jsonl`);
 }
 
+/** Append-only log of read message ids (one id per line). Append-only so
+ * concurrent markers union rather than clobber each other's marks. */
 export function readStatePath(project: string): string {
+  return join(READ_DIR, `${projectSlug(project)}.read`);
+}
+
+/** Pre-append-only read-state file (`{read:[...]}` JSON). Read for migration so
+ * existing marks survive the format change; never written anymore. */
+export function legacyReadStatePath(project: string): string {
   return join(READ_DIR, `${projectSlug(project)}.json`);
 }
