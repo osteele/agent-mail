@@ -554,6 +554,41 @@ channel, then add to ${CONFIG_PATH}:
   }
 }
 
+const HELP = `agent-mail — local mail bus for Claude Code agents
+
+Usage: agent-mail <command> [options]
+
+Messaging:
+  notify --project <dir> --message <text> [--from <label>] [--reply-to <id>]
+                        Send a message to a project's inbox
+  inbox [--project <dir>] [--limit N] [--unread]
+                        Read a project's spool (defaults to cwd)
+  mark-read [--project <dir>] (--id <message-id> | --all)
+                        Mark messages read
+  listeners             List live sessions
+
+Dashboards:
+  dashboard [--port N] [--open] [--no-tui]
+                        Serve the web dashboard (press o to open, q to quit)
+  slack-dashboard [--watch <seconds>]
+                        Post / refresh the editable Slack dashboard
+
+Daemon (launchd-aware):
+  start | stop | restart   Manage the daemon process
+  graceful                 Reload config (SIGHUP) without a restart
+  status                   Daemon health + listening sessions
+  logs [-f]                Show, or follow, the daemon log
+
+Setup:
+  install                  LaunchAgent (boot start) + ~/.claude.json entry
+  uninstall                Remove both
+
+Config: ~/.config/agent-mail/config.toml  (port, Slack webhook/bot token)`;
+
+function printHelp(stream: "out" | "err" = "out"): void {
+  (stream === "err" ? console.error : console.log)(HELP);
+}
+
 // --- dispatch -------------------------------------------------------------------
 
 const [cmd, ...rest] = process.argv.slice(2);
@@ -603,9 +638,14 @@ switch (cmd) {
   case "uninstall":
     cmdUninstall();
     break;
+  case undefined:
+  case "help":
+  case "--help":
+  case "-h":
+    printHelp();
+    break;
   default:
-    console.log(
-      "usage: agent-mail <notify|inbox|listeners|dashboard|slack-dashboard|start|stop|restart|graceful|status|logs|install|uninstall>",
-    );
-    process.exit(cmd ? 1 : 0);
+    console.error(`agent-mail: unknown command "${cmd}"\n`);
+    printHelp("err");
+    process.exit(1);
 }
