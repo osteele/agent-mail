@@ -27,6 +27,7 @@ import {
   LOG_PATH,
   PID_PATH,
   canonicalProject,
+  displayName,
   ensureDirs,
 } from "./paths.ts";
 import { listLive } from "./registry.ts";
@@ -256,16 +257,19 @@ async function cmdNotify(
   const message = flags.message;
   if (typeof project !== "string" || typeof message !== "string") {
     console.error(
-      "usage: agent-mail notify --project <dir> --message <text> [--from <label>]",
+      "usage: agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to <id>]",
     );
     process.exit(1);
   }
   const config = loadConfig();
   const resolvedProject = resolveProjectArg(project);
+  const replyTo =
+    typeof flags["reply-to"] === "string" ? flags["reply-to"] : undefined;
   const body = JSON.stringify({
     project: resolvedProject,
     message,
     from: typeof flags.from === "string" ? flags.from : "cli",
+    ...(replyTo ? { replyTo } : {}),
   });
   try {
     const resp = await fetch(`http://127.0.0.1:${config.port}/notify`, {
@@ -288,6 +292,7 @@ async function cmdNotify(
       from: typeof flags.from === "string" ? flags.from : "cli",
       project: resolvedProject,
       message,
+      ...(replyTo ? { replyTo } : {}),
     });
     console.log("daemon unreachable; spooled directly (no Slack echo)");
   }
@@ -308,8 +313,9 @@ function cmdInbox(flags: Record<string, string | boolean>): void {
     return;
   }
   for (const m of messages) {
+    const reply = m.replyTo ? ` ↩${m.replyTo.slice(0, 8)}` : "";
     console.log(
-      `${m.id} ${m.read ? "read" : "unread"} [${m.ts}] from ${m.from}: ${m.message}`,
+      `${m.id} ${m.read ? "read" : "unread"} [${m.ts}] from ${displayName(m.from)}${reply}: ${m.message}`,
     );
   }
 }

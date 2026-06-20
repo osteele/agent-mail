@@ -18,6 +18,8 @@ export interface Message {
   from: string; // sender label: "weft", a project slug, "cli", ...
   project: string; // canonical target project directory
   message: string;
+  replyTo?: string; // id of the message this is a reply to
+  threadId?: string; // root message id; groups a back-and-forth conversation
   meta?: Record<string, string>;
 }
 
@@ -34,7 +36,12 @@ export interface ReadMessagesOptions {
 export function appendMessage(msg: Message): string {
   ensureDirs();
   const path = spoolPath(msg.project);
-  const withId = { ...msg, id: msg.id ?? randomUUID() };
+  const id = msg.id ?? randomUUID();
+  // Every message carries a threadId so a conversation can be grouped uniformly:
+  // a reply inherits its parent's thread (resolved upstream, where the parent is
+  // visible), and a root message is its own thread.
+  const threadId = msg.threadId ?? msg.replyTo ?? id;
+  const withId = { ...msg, id, threadId };
   appendFileSync(path, `${JSON.stringify(withId)}\n`);
   return path;
 }

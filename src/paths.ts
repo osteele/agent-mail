@@ -43,6 +43,13 @@ export function canonicalProject(project: string): string {
   return existsSync(abs) ? realpathSync(abs) : abs;
 }
 
+/** Display name for a sender/recipient: basename of a path, else the label
+ * verbatim (so "weft", "cli", or a friendly slug pass through unchanged). */
+export function displayName(pathOrLabel: string): string {
+  if (!pathOrLabel.includes("/")) return pathOrLabel;
+  return pathOrLabel.split("/").filter(Boolean).pop() ?? pathOrLabel;
+}
+
 /** Stable spool slug for a project directory: basename + path hash. */
 export function projectSlug(project: string): string {
   const canon = canonicalProject(project);

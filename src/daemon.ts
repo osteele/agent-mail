@@ -13,7 +13,13 @@
 
 import { appendFileSync, writeFileSync } from "node:fs";
 import { type Config, loadConfig } from "./config.ts";
-import { LOG_PATH, PID_PATH, canonicalProject, ensureDirs } from "./paths.ts";
+import {
+  LOG_PATH,
+  PID_PATH,
+  canonicalProject,
+  displayName,
+  ensureDirs,
+} from "./paths.ts";
 import { listLive } from "./registry.ts";
 import {
   type Message,
@@ -30,18 +36,56 @@ function log(line: string): void {
   appendFileSync(LOG_PATH, stamped);
 }
 
+/** Slack section text caps at 3000 chars; leave headroom for mrkdwn escaping. */
+const SLACK_BODY_LIMIT = 2900;
+
+function slackDate(ts: string): string {
+  const epoch = Math.floor(Date.parse(ts) / 1000);
+  if (!Number.isFinite(epoch)) return "";
+  const fallback = new Date(ts).toLocaleTimeString();
+  return ` · <!date^${epoch}^{time}|${fallback}>`;
+}
+
 async function echoToSlack(msg: Message): Promise<void> {
   if (config.slackEcho === "none" || !config.slackWebhook) return;
-  const project = msg.project.split("/").filter(Boolean).pop() ?? msg.project;
-  const listeners = listLive().some(
+  const sender = displayName(msg.from);
+  const recipient = displayName(msg.project);
+  const listening = listLive().some(
     (r) => canonicalProject(r.cwd) === msg.project,
   );
-  const delivery = listeners ? "" : " _(no session listening; spooled)_";
-  const text = `:mailbox: [${project}] *${msg.from}*: ${msg.message}${delivery}`;
+  const body =
+    msg.message.length > SLACK_BODY_LIMIT
+      ? `${msg.message.slice(0, SLACK_BODY_LIMIT - 1)}…`
+      : msg.message;
+
+  const lines = [`:mailbox: *${sender}* → *${recipient}*${slackDate(msg.ts)}`];
+  // Incoming webhooks can't post into a Slack thread (that needs a bot token —
+  // see ROADMAP), so a reply renders its parent inline as quoted context.
+  if (msg.replyTo) {
+    const re = msg.meta?.replyToFrom
+      ? `*${msg.meta.replyToFrom}*: ${msg.meta.replyToPreview ?? ""}`
+      : `message ${msg.replyTo.slice(0, 8)}`;
+    lines.push(`↩︎ re ${re}`);
+  }
+  lines.push(body);
+  const blocks: object[] = [
+    { type: "section", text: { type: "mrkdwn", text: lines.join("\n") } },
+  ];
+  if (!listening) {
+    blocks.push({
+      type: "context",
+      elements: [{ type: "mrkdwn", text: "_no session listening; spooled_" }],
+    });
+  }
+
   const resp = await fetch(config.slackWebhook, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    // `text` is the notification/preview fallback when blocks can't render.
+    body: JSON.stringify({
+      text: `📬 ${sender} → ${recipient}: ${body}`,
+      blocks,
+    }),
   });
   if (!resp.ok) {
     log(`slack echo failed: ${resp.status} ${await resp.text()}`);
@@ -102,6 +146,8 @@ const server = Bun.serve({
         from: body.from ?? "unknown",
         project: canonicalProject(body.project),
         message: body.message,
+        ...(body.replyTo ? { replyTo: body.replyTo } : {}),
+        ...(body.threadId ? { threadId: body.threadId } : {}),
         ...(body.meta ? { meta: body.meta } : {}),
       };
       const path = appendMessage(msg);

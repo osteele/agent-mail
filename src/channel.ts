@@ -22,7 +22,12 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { loadConfig } from "./config.ts";
-import { canonicalProject, ensureDirs, spoolPath } from "./paths.ts";
+import {
+  canonicalProject,
+  displayName,
+  ensureDirs,
+  spoolPath,
+} from "./paths.ts";
 import { listLive, register, unregister } from "./registry.ts";
 import { claudeSessions, sessionName } from "./sessions.ts";
 import {
@@ -70,6 +75,12 @@ function liveSessions(dir?: string): {
     });
 }
 
+/** One-line snippet of a message body, for reply previews. */
+function preview(text: string, max = 140): string {
+  const flat = text.replace(/\s+/g, " ").trim();
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
 function describeSessions(
   sessions: { sessionId: string; name?: string; status?: string }[],
 ): string {
@@ -99,7 +110,9 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
       description:
         "Send a message to another project's agent-mail inbox. By default " +
         "every session in the target directory sees it; pass `session` to " +
-        "address one specific session.",
+        "address one specific session. To continue a conversation, pass " +
+        "`reply_to` with the id of the message you are answering (ids are " +
+        "shown by check_inbox) — the reply is grouped into the same thread.",
       inputSchema: {
         type: "object",
         properties: {
@@ -113,6 +126,12 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
             description:
               "Optional: name or id of a specific session in the target " +
               "directory (see list_sessions). Omit to reach all sessions there.",
+          },
+          reply_to: {
+            type: "string",
+            description:
+              "Optional: id of the message this answers (from check_inbox). " +
+              "Threads the reply with the original.",
           },
         },
         required: ["project", "message"],
@@ -190,14 +209,30 @@ async function deliver(msg: Message): Promise<string> {
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   if (req.params.name === "send_mail") {
-    const { project, message, session } = req.params.arguments as {
+    const { project, message, session, reply_to } = req.params.arguments as {
       project: string;
       message: string;
       session?: string;
+      reply_to?: string;
     };
     const target = canonicalProject(project);
     const meta: Record<string, string> = { sessionId };
     if (myName) meta.fromName = myName;
+    let replyTo: string | undefined;
+    let threadId: string | undefined;
+    if (reply_to) {
+      replyTo = reply_to;
+      // The message being answered was received here, so it lives in our own
+      // inbox. Inherit its thread and carry a preview for the Slack echo.
+      const parent = readMessages(cwd, { limit: 0 }).find(
+        (m) => m.id === reply_to,
+      );
+      threadId = parent?.threadId ?? parent?.id ?? reply_to;
+      if (parent) {
+        meta.replyToFrom = displayName(parent.from);
+        meta.replyToPreview = preview(parent.message);
+      }
+    }
     if (session) {
       const peers = liveSessions(target);
       const matches = peers.filter(
@@ -235,6 +270,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       from: cwd,
       project: target,
       message,
+      ...(replyTo ? { replyTo } : {}),
+      ...(threadId ? { threadId } : {}),
       meta,
     });
     return { content: [{ type: "text", text: status }] };
@@ -280,7 +317,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
                   const tag = sender ? ` [${sender}]` : "";
                   const direct =
                     m.meta?.toSession === sessionId ? " (to you)" : "";
-                  return `${m.id} ${m.read ? "read" : "unread"} [${m.ts}] from ${m.from}${tag}${direct}: ${m.message}`;
+                  const reply = m.replyTo ? ` ↩${m.replyTo.slice(0, 8)}` : "";
+                  return `${m.id} ${m.read ? "read" : "unread"} [${m.ts}] from ${displayName(m.from)}${tag}${direct}${reply}: ${m.message}`;
                 })
                 .join("\n")
             : "inbox empty",
