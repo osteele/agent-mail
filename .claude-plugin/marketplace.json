@@ -1,0 +1,14 @@
+{
+  "name": "osteele-local",
+  "description": "Local-only marketplace for Oliver Steele's personal Claude Code channel plugins.",
+  "owner": {
+    "name": "Oliver Steele"
+  },
+  "plugins": [
+    {
+      "name": "agent-mail",
+      "source": "./plugins/agent-mail",
+      "description": "Local mail bus channel for Claude Code agents: pushes inbox messages into the session as <channel> events."
+    }
+  ]
+}

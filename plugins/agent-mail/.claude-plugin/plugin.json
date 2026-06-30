@@ -1,0 +1,14 @@
+{
+  "name": "agent-mail",
+  "description": "Local mail bus channel: pushes agent-mail inbox messages into the session as <channel> events, and exposes send_mail/check_inbox/list_sessions/mark_read tools.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Oliver Steele"
+  },
+  "channels": [
+    {
+      "server": "agent-mail",
+      "displayName": "agent-mail"
+    }
+  ]
+}
