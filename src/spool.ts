@@ -32,6 +32,19 @@ export interface ReadMessagesOptions {
   unreadOnly?: boolean;
 }
 
+/** Whether a message in a shared project spool is visible to one session.
+ *
+ * A project inbox is shared by every session in that directory. Session-local
+ * views hide messages authored by the same session, unless the sender
+ * explicitly addressed the message back to itself. */
+export function messageVisibleToSession(
+  msg: Message,
+  sessionId: string,
+): boolean {
+  if (msg.meta?.toSession && msg.meta.toSession !== sessionId) return false;
+  return msg.meta?.sessionId !== sessionId || msg.meta?.toSession === sessionId;
+}
+
 export function appendMessage(msg: Message): string {
   ensureDirs();
   const path = spoolPath(msg.project);

@@ -35,8 +35,8 @@ import { claudeSessions, sessionDisplayName, sessionName } from "./sessions.ts";
 import {
   type Message,
   appendMessage,
-  markAllMessagesRead,
   markMessagesRead,
+  messageVisibleToSession,
   readMessages,
 } from "./spool.ts";
 
@@ -85,6 +85,18 @@ function liveSessions(dir?: string): {
 function preview(text: string, max = 140): string {
   const flat = text.replace(/\s+/g, " ").trim();
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+function sessionMessages(opts: {
+  limit?: number;
+  unreadOnly?: boolean;
+}): ReturnType<typeof readMessages> {
+  const all = readMessages(cwd, {
+    limit: 0,
+    unreadOnly: opts.unreadOnly ?? false,
+  }).filter((msg) => messageVisibleToSession(msg, sessionId));
+  const limit = opts.limit ?? 20;
+  return limit > 0 ? all.slice(-limit) : all;
 }
 
 function describeSessions(
@@ -235,7 +247,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       replyTo = reply_to;
       // The message being answered was received here, so it lives in our own
       // inbox. Inherit its thread and carry a preview for the Slack echo.
-      const parent = readMessages(cwd, { limit: 0 }).find(
+      const parent = sessionMessages({ limit: 0 }).find(
         (m) => m.id === reply_to,
       );
       threadId = parent?.threadId ?? parent?.id ?? reply_to;
@@ -312,7 +324,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       limit?: number;
       unread?: boolean;
     };
-    const messages = readMessages(cwd, {
+    const messages = sessionMessages({
       limit: limit ?? 20,
       unreadOnly: unread ?? false,
     });
@@ -344,12 +356,20 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     };
     let count: number;
     if (all === true) {
-      count = markAllMessagesRead(cwd);
+      const unread = sessionMessages({ limit: 0, unreadOnly: true });
+      count = markMessagesRead(
+        cwd,
+        unread.map((msg) => msg.id),
+      );
     } else {
       if (!Array.isArray(ids)) {
         throw new Error("mark_read requires ids or all=true");
       }
-      count = markMessagesRead(cwd, ids);
+      const available = new Set(sessionMessages({ limit: 0 }).map((m) => m.id));
+      count = markMessagesRead(
+        cwd,
+        ids.filter((id) => available.has(id)),
+      );
     }
     return {
       content: [{ type: "text", text: `marked ${count} message(s) read` }],
@@ -391,10 +411,7 @@ async function poll(): Promise<void> {
     }
     // Skip our own mail: same directory shares one spool, so a message we sent
     // to this project would otherwise be pushed back into our own session.
-    if (msg.meta?.sessionId === sessionId) continue;
-    // Honor session-targeted mail: a message addressed to another session in
-    // this shared-spool directory is not for us.
-    if (msg.meta?.toSession && msg.meta.toSession !== sessionId) continue;
+    if (!messageVisibleToSession(msg, sessionId)) continue;
     await mcp.notification({
       method: "notifications/claude/channel",
       params: {
