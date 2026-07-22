@@ -37,6 +37,13 @@ identified by `CLAUDE_CODE_SESSION_ID` and labelled with its Claude Code
 session name (set via `/rename`) when available, otherwise agent-mail derives a
 stable pronounceable alias from the session id.
 
+The project spool stores every message for that directory. Session-local views
+(`check_inbox`, `mark_read`, and channel push) filter it for the current
+session: a session does not see mail it authored itself, and a direct
+session-targeted message is visible only to the addressed session. The CLI
+`agent-mail inbox` and HTTP `/inbox` endpoint are project-spool views and show
+the stored messages without session-local filtering.
+
 Each session also records its **host client** — `claude-code` or `codex` —
 captured from the MCP handshake and shown in `status`, `list_sessions`, and the
 dashboard. Codex sets no session env var, so Codex sessions get a per-process
