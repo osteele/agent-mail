@@ -36,7 +36,7 @@ import {
   ensureDirs,
 } from "./paths.ts";
 import { listLive } from "./registry.ts";
-import { claudeSessions } from "./sessions.ts";
+import { claudeSessions, sessionDisplayName } from "./sessions.ts";
 import {
   SlackDashboardUnconfigured,
   refreshSlackDashboard,
@@ -55,12 +55,9 @@ function sessionLabel(
   r: { sessionId?: string; name?: string; client?: string },
   names = claudeSessions(),
 ): string {
-  const name = (r.sessionId && names.get(r.sessionId)?.name) ?? r.name;
-  if (name) return name;
-  const kind = r.client ?? "session";
-  return r.sessionId
-    ? `${kind} ${r.sessionId.slice(0, 8)}`
-    : (r.client ?? "unnamed");
+  if (!r.sessionId) return r.client ?? "unnamed";
+  const name = names.get(r.sessionId)?.name ?? r.name;
+  return sessionDisplayName(r.sessionId, name);
 }
 
 const SRC_DIR = dirname(new URL(import.meta.url).pathname);

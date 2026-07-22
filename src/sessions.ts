@@ -4,10 +4,11 @@
  * file mapping {sessionId, cwd, name, status, ...}. We read it only to attach a
  * human-readable name (set via `/rename`) to a sessionId. Read defensively —
  * the format may change between Claude Code versions, or be absent on older
- * ones, in which case names are simply unavailable and callers fall back to the
- * raw sessionId.
+ * ones, in which case names are simply unavailable and callers use a
+ * generated alias.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -20,6 +21,38 @@ const SESSIONS_DIR = join(
 export interface ClaudeSessionMeta {
   name?: string;
   status?: string;
+}
+
+const ONSETS = [
+  "b",
+  "br",
+  "d",
+  "f",
+  "fl",
+  "g",
+  "h",
+  "j",
+  "k",
+  "l",
+  "m",
+  "n",
+  "p",
+  "r",
+  "s",
+  "t",
+  "v",
+  "w",
+  "z",
+];
+const VOWELS = ["a", "e", "i", "o", "u", "ai", "ia"];
+const CODAS = ["", "", "", "l", "m", "n", "r", "s"];
+
+function syllable(bytes: Buffer, offset: number): string {
+  return (
+    ONSETS[bytes[offset] % ONSETS.length] +
+    VOWELS[bytes[offset + 1] % VOWELS.length] +
+    CODAS[bytes[offset + 2] % CODAS.length]
+  );
 }
 
 /** Map of sessionId -> {name, status} for every recorded Claude Code session.
@@ -51,4 +84,22 @@ export function claudeSessions(): Map<string, ClaudeSessionMeta> {
 /** Human-readable name for a sessionId, if Claude Code recorded one. */
 export function sessionName(sessionId: string): string | undefined {
   return claudeSessions().get(sessionId)?.name;
+}
+
+/** Deterministic, pronounceable fallback for sessions without a `/rename`.
+ *
+ * The raw session id remains the durable address; this is just a compact alias
+ * for humans and dashboards. */
+export function generatedSessionName(sessionId: string): string {
+  const bytes = createHash("sha256").update(sessionId).digest();
+  return `${syllable(bytes, 0)}${syllable(bytes, 3)}-${syllable(bytes, 6)}${syllable(bytes, 9)}`;
+}
+
+/** Prefer an explicit Claude Code `/rename`; otherwise use the generated alias. */
+export function sessionDisplayName(
+  sessionId: string,
+  explicitName?: string,
+): string {
+  const name = explicitName?.trim();
+  return name || generatedSessionName(sessionId);
 }

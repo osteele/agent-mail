@@ -116,7 +116,7 @@ function render(s) {
     ? s.presence.map((p) =>
         '<div class="row"><span class="dot"></span><b>' + esc(p.project) + '</b>' +
         (p.client ? ' <span class="client">' + esc(p.client) + '</span>' : '') +
-        (p.name ? ' <span class="muted">' + esc(p.name) + '</span>' : '') +
+        ' <span class="muted">' + esc(p.label) + '</span>' +
         (p.status ? ' <span class="muted">[' + esc(p.status) + ']</span>' : '') +
         '</div>').join("")
     : '<div class="empty">no sessions listening</div>';

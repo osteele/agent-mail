@@ -59,7 +59,7 @@ function buildBlocks(state: DashboardState): object[] {
     ? state.presence
         .map(
           (p) =>
-            `🟢 *${p.project}*${p.name ? ` — ${p.name}` : ""}` +
+            `🟢 *${p.project}* — ${p.label}` +
             `${p.status ? ` _[${p.status}]_` : ""}`,
         )
         .join("\n")

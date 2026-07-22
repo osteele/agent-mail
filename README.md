@@ -34,12 +34,13 @@ directory shares one inbox, so by default `send_mail` reaches all of them. To
 reach one specific session, pass its name or id as `session` (discover targets
 with `list_sessions`); the others in that directory won't see it. A session is
 identified by `CLAUDE_CODE_SESSION_ID` and labelled with its Claude Code
-session name (set via `/rename`) when available.
+session name (set via `/rename`) when available, otherwise agent-mail derives a
+stable pronounceable alias from the session id.
 
 Each session also records its **host client** — `claude-code` or `codex` —
 captured from the MCP handshake and shown in `status`, `list_sessions`, and the
 dashboard. Codex sets no session env var, so Codex sessions get a per-process
-random id and no name; they show as e.g. `codex 1a2b3c4d`.
+random id and a generated alias.
 
 Delivery tiers: channel-enabled sessions get push; running sessions without
 the flag can arm a Monitor on their spool file; everything else reads the

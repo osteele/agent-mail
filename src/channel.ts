@@ -31,7 +31,7 @@ import {
   spoolPath,
 } from "./paths.ts";
 import { listLive, register, unregister } from "./registry.ts";
-import { claudeSessions, sessionName } from "./sessions.ts";
+import { claudeSessions, sessionDisplayName, sessionName } from "./sessions.ts";
 import {
   type Message,
   appendMessage,
@@ -48,7 +48,8 @@ const cwd = canonicalProject(process.cwd());
 // spool) and to suppress self-echo of our own outgoing mail.
 const sessionId = process.env.CLAUDE_CODE_SESSION_ID ?? randomUUID();
 const myName = sessionName(sessionId);
-const selfLabel = myName ? `${myName} (${sessionId})` : sessionId;
+const myLabel = sessionDisplayName(sessionId, myName);
+const selfLabel = `${myLabel} (${sessionId})`;
 const config = loadConfig();
 const mySpool = spoolPath(cwd);
 
@@ -58,7 +59,7 @@ const mySpool = spoolPath(cwd);
 function liveSessions(dir?: string): {
   sessionId: string;
   cwd: string;
-  name?: string;
+  name: string;
   status?: string;
   client?: string;
   pid: number;
@@ -68,10 +69,11 @@ function liveSessions(dir?: string): {
     .filter((r) => r.sessionId && (!dir || canonicalProject(r.cwd) === dir))
     .map((r) => {
       const sid = r.sessionId as string;
+      const name = meta.get(sid)?.name ?? r.name;
       return {
         sessionId: sid,
         cwd: canonicalProject(r.cwd),
-        name: meta.get(sid)?.name ?? r.name,
+        name: sessionDisplayName(sid, name),
         status: meta.get(sid)?.status,
         client: r.client,
         pid: r.pid,
@@ -88,7 +90,7 @@ function preview(text: string, max = 140): string {
 function describeSessions(
   sessions: {
     sessionId: string;
-    name?: string;
+    name: string;
     status?: string;
     client?: string;
   }[],
@@ -96,7 +98,7 @@ function describeSessions(
   return sessions
     .map(
       (s) =>
-        `  - ${s.name ? `${s.name} ` : ""}${s.sessionId}${s.client ? ` <${s.client}>` : ""}${s.status ? ` [${s.status}]` : ""}`,
+        `  - ${s.name} (${s.sessionId})${s.client ? ` <${s.client}>` : ""}${s.status ? ` [${s.status}]` : ""}`,
     )
     .join("\n");
 }
@@ -226,7 +228,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     };
     const target = canonicalProject(project);
     const meta: Record<string, string> = { sessionId };
-    if (myName) meta.fromName = myName;
+    meta.fromName = myLabel;
     let replyTo: string | undefined;
     let threadId: string | undefined;
     if (reply_to) {
@@ -297,7 +299,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             ? sessions
                 .map(
                   (s) =>
-                    `${s.name ? `${s.name} ` : ""}${s.sessionId}${s.client ? ` <${s.client}>` : ""} — ${s.cwd}${s.status ? ` [${s.status}]` : ""}${s.sessionId === sessionId ? " (you)" : ""}`,
+                    `${s.name} (${s.sessionId})${s.client ? ` <${s.client}>` : ""} — ${s.cwd}${s.status ? ` [${s.status}]` : ""}${s.sessionId === sessionId ? " (you)" : ""}`,
                 )
                 .join("\n")
             : "no sessions listening",
