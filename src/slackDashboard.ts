@@ -60,7 +60,8 @@ function buildBlocks(state: DashboardState): object[] {
         .map(
           (p) =>
             `🟢 *${p.project}* — ${p.label}` +
-            `${p.status ? ` _[${p.status}]_` : ""}`,
+            `${p.status ? ` _[${p.status}]_` : ""}` +
+            `${p.muted ? " 🔕" : ""}`,
         )
         .join("\n")
     : "_no sessions listening_";

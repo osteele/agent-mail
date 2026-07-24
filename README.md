@@ -18,8 +18,9 @@ notifications).
 - **Channel server** (`src/channel.ts`): spawned per Claude Code session as an
   MCP server. Tails the session project's spool and pushes new messages into
   the session as `<channel source="agent-mail">` events. Also exposes
-  `send_mail`, `list_sessions`, `check_inbox`, and `mark_read` tools, which
-  work even without channel push.
+  `send_mail`, `list_sessions`, `check_inbox`, `mark_read`, and
+  `mute_notifications` / `unmute_notifications` tools, which work even without
+  channel push.
 - **Registry** (`~/.claude/agent-mail/registry/`): which sessions are
   listening (`cwd`, `pid`, `sessionId`, `name`), pruned by pid liveness.
 - **Dashboards** (`src/dashboard.ts`, `src/slackDashboard.ts`): read the spools
@@ -53,6 +54,17 @@ Delivery tiers: channel-enabled sessions get push; running sessions without
 the flag can arm a Monitor on their spool file; everything else reads the
 spool on next check (`agent-mail inbox` or the `check_inbox` tool).
 
+### Muting
+
+A session can pause its channel push — from inside the agent with the
+`mute_notifications` tool, or from outside with `agent-mail mute` (targeted by
+`--session <name-or-id>` and/or `--project <dir>`). While muted, incoming mail
+still spools (and stays visible to `check_inbox` / `agent-mail inbox`) but is
+not pushed as a `<channel>` event. `unmute_notifications` / `agent-mail unmute`
+delivers everything held during the mute at once, then resumes normal push.
+Muting only affects an agent's push; the daemon still spools and Slack-echoes
+every message. Mute is per-session and clears when the session restarts.
+
 ### Threads
 
 To answer a message, pass its id as `reply_to` to the `send_mail` tool (ids are
@@ -85,6 +97,7 @@ agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to 
 agent-mail inbox [--project <dir>] [--limit N] [--unread]
 agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
 agent-mail listeners                  # live sessions
+agent-mail mute|unmute (--session <name-or-id> | --project <dir>)  # pause/resume push
 agent-mail dashboard [--port N] [--open] [--no-tui]   # web dashboard
 agent-mail slack-dashboard [--watch <seconds>]        # editable Slack dashboard
 agent-mail start|stop|restart|status  # daemon (launchd-aware)

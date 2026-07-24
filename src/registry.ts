@@ -16,6 +16,7 @@ export interface Registration {
   sessionId?: string; // host session id (Claude Code's; a random uuid under Codex)
   name?: string; // session name snapshot at register time (may go stale on rename)
   client?: string; // host client from MCP clientInfo: "claude-code", "codex", ...
+  muted?: boolean; // channel push paused; messages still spool and flush on unmute
   started: string; // ISO 8601
 }
 
@@ -32,13 +33,16 @@ export function register(
 ): string {
   ensureDirs();
   const path = entryPath(cwd, pid);
-  // Preserve the original start time across the post-initialize re-register
-  // (which adds the client once the MCP handshake reveals it).
+  // Preserve state set before this re-register: the original start time (the
+  // post-initialize re-register adds the client once the handshake reveals it)
+  // and any mute toggled during the brief startup window.
   let started = new Date().toISOString();
+  let muted: boolean | undefined;
   if (existsSync(path)) {
     try {
       const prev = JSON.parse(readFileSync(path, "utf8")) as Registration;
       if (typeof prev.started === "string") started = prev.started;
+      if (typeof prev.muted === "boolean") muted = prev.muted;
     } catch {
       // corrupt prior entry; keep the fresh timestamp
     }
@@ -49,10 +53,41 @@ export function register(
     ...(sessionId ? { sessionId } : {}),
     ...(name ? { name } : {}),
     ...(client ? { client } : {}),
+    ...(muted !== undefined ? { muted } : {}),
     started,
   };
   writeFileSync(path, JSON.stringify(entry, null, 1));
   return path;
+}
+
+/** Toggle a session's channel-push mute. Returns false if no entry exists (the
+ * session isn't/no longer listening). */
+export function setMuted(cwd: string, pid: number, muted: boolean): boolean {
+  const path = entryPath(cwd, pid);
+  if (!existsSync(path)) return false;
+  let entry: Registration;
+  try {
+    entry = JSON.parse(readFileSync(path, "utf8")) as Registration;
+  } catch {
+    return false;
+  }
+  entry.muted = muted;
+  writeFileSync(path, JSON.stringify(entry, null, 1));
+  return true;
+}
+
+/** Whether a session's channel push is muted. Fail-open (deliver) on a missing
+ * or corrupt entry. */
+export function isMuted(cwd: string, pid: number): boolean {
+  const path = entryPath(cwd, pid);
+  if (!existsSync(path)) return false;
+  try {
+    return (
+      (JSON.parse(readFileSync(path, "utf8")) as Registration).muted === true
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function unregister(cwd: string, pid: number): void {

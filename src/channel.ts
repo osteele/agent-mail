@@ -12,7 +12,9 @@
  *   CLAUDE_CODE_SESSION_ID (Codex sets no session env var, so it falls back to a
  *   per-process random uuid); name from Claude Code's session metadata; client
  *   ("claude-code"/"codex") from the MCP clientInfo once the handshake lands.
- * - Tools: send_mail, list_sessions, check_inbox, and mark_read.
+ * - Tools: send_mail, list_sessions, check_inbox, mark_read, and
+ *   mute_notifications / unmute_notifications (pause/resume this session's
+ *   channel push — mail keeps spooling while muted and flushes on unmute).
  */
 
 import { randomUUID } from "node:crypto";
@@ -30,7 +32,13 @@ import {
   ensureDirs,
   spoolPath,
 } from "./paths.ts";
-import { listLive, register, unregister } from "./registry.ts";
+import {
+  isMuted,
+  listLive,
+  register,
+  setMuted,
+  unregister,
+} from "./registry.ts";
 import { claudeSessions, sessionDisplayName, sessionName } from "./sessions.ts";
 import {
   type Message,
@@ -62,6 +70,7 @@ function liveSessions(dir?: string): {
   name: string;
   status?: string;
   client?: string;
+  muted?: boolean;
   pid: number;
 }[] {
   const meta = claudeSessions();
@@ -76,6 +85,7 @@ function liveSessions(dir?: string): {
         name: sessionDisplayName(sid, name),
         status: meta.get(sid)?.status,
         client: r.client,
+        muted: r.muted,
         pid: r.pid,
       };
     });
@@ -105,12 +115,13 @@ function describeSessions(
     name: string;
     status?: string;
     client?: string;
+    muted?: boolean;
   }[],
 ): string {
   return sessions
     .map(
       (s) =>
-        `  - ${s.name} (${s.sessionId})${s.client ? ` <${s.client}>` : ""}${s.status ? ` [${s.status}]` : ""}`,
+        `  - ${s.name} (${s.sessionId})${s.client ? ` <${s.client}>` : ""}${s.status ? ` [${s.status}]` : ""}${s.muted ? " [muted]" : ""}`,
     )
     .join("\n");
 }
@@ -122,7 +133,7 @@ const mcp = new Server(
       experimental: { "claude/channel": {} },
       tools: {},
     },
-    instructions: `Local mail between coding agents. You are session ${selfLabel} in ${cwd}. Use check_inbox for recent/unread mail, mark_read after acting, and send_mail to contact another project. Multiple sessions in one directory share an inbox; to reach a specific one, pass its name or id as \`session\` to send_mail, and use list_sessions to discover targets.`,
+    instructions: `Local mail between coding agents. You are session ${selfLabel} in ${cwd}. Use check_inbox for recent/unread mail, mark_read after acting, and send_mail to contact another project. Multiple sessions in one directory share an inbox; to reach a specific one, pass its name or id as \`session\` to send_mail, and use list_sessions to discover targets. Call mute_notifications to pause channel push (incoming mail keeps spooling and stays visible to check_inbox); unmute_notifications flushes anything held and resumes push.`,
   },
 );
 
@@ -209,6 +220,21 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
         },
       },
+    },
+    {
+      name: "mute_notifications",
+      description:
+        "Pause channel push for this session. Incoming mail keeps spooling " +
+        "and stays visible to check_inbox, but is not pushed as a channel " +
+        "event. When you unmute, everything held is delivered at once.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "unmute_notifications",
+      description:
+        "Resume channel push for this session, delivering any messages that " +
+        "arrived while muted.",
+      inputSchema: { type: "object", properties: {} },
     },
   ],
 }));
@@ -311,7 +337,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             ? sessions
                 .map(
                   (s) =>
-                    `${s.name} (${s.sessionId})${s.client ? ` <${s.client}>` : ""} — ${s.cwd}${s.status ? ` [${s.status}]` : ""}${s.sessionId === sessionId ? " (you)" : ""}`,
+                    `${s.name} (${s.sessionId})${s.client ? ` <${s.client}>` : ""} — ${s.cwd}${s.status ? ` [${s.status}]` : ""}${s.muted ? " [muted]" : ""}${s.sessionId === sessionId ? " (you)" : ""}`,
                 )
                 .join("\n")
             : "no sessions listening",
@@ -375,6 +401,28 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       content: [{ type: "text", text: `marked ${count} message(s) read` }],
     };
   }
+  if (req.params.name === "mute_notifications") {
+    setMuted(cwd, process.pid, true);
+    return {
+      content: [
+        {
+          type: "text",
+          text: "channel notifications paused; incoming mail keeps spooling (visible to check_inbox) and flushes when you unmute",
+        },
+      ],
+    };
+  }
+  if (req.params.name === "unmute_notifications") {
+    setMuted(cwd, process.pid, false);
+    return {
+      content: [
+        {
+          type: "text",
+          text: "channel notifications on; any messages held while muted will be delivered now",
+        },
+      ],
+    };
+  }
   throw new Error(`unknown tool: ${req.params.name}`);
 });
 
@@ -399,6 +447,9 @@ async function poll(): Promise<void> {
   const size = statSync(mySpool).size;
   if (size < offset) offset = 0; // spool was truncated/rotated
   if (size === offset) return;
+  // Muted: leave `offset` where it is so nothing is consumed. New lines pile up
+  // in the spool and flush from here on the first poll after unmute.
+  if (isMuted(cwd, process.pid)) return;
   const file = Bun.file(mySpool);
   const chunk = await file.slice(offset, size).text();
   offset = size;

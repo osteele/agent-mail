@@ -118,6 +118,7 @@ function render(s) {
         (p.client ? ' <span class="client">' + esc(p.client) + '</span>' : '') +
         ' <span class="muted">' + esc(p.label) + '</span>' +
         (p.status ? ' <span class="muted">[' + esc(p.status) + ']</span>' : '') +
+        (p.muted ? ' <span class="muted">🔕 muted</span>' : '') +
         '</div>').join("")
     : '<div class="empty">no sessions listening</div>';
 

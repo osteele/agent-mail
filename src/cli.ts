@@ -6,6 +6,7 @@
  *   agent-mail inbox [--project <dir>] [--limit N] [--unread]
  *   agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
  *   agent-mail listeners
+ *   agent-mail mute|unmute (--session <name-or-id> | --project <dir>)
  *
  * Dashboards:
  *   agent-mail dashboard [--port N] [--open] [--no-tui]
@@ -35,7 +36,7 @@ import {
   displayName,
   ensureDirs,
 } from "./paths.ts";
-import { listLive } from "./registry.ts";
+import { type Registration, listLive, setMuted } from "./registry.ts";
 import { claudeSessions, sessionDisplayName } from "./sessions.ts";
 import {
   SlackDashboardUnconfigured,
@@ -204,7 +205,9 @@ async function cmdStatus(): Promise<void> {
   const names = claudeSessions();
   console.log(`listening sessions: ${live.length}`);
   for (const r of live)
-    console.log(`  ${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid})`);
+    console.log(
+      `  ${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid})${r.muted ? " [muted]" : ""}`,
+    );
 }
 
 function cmdLogs(follow: boolean): void {
@@ -359,8 +362,62 @@ function cmdListeners(): void {
   const names = claudeSessions();
   for (const r of live) {
     console.log(
-      `${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid}, since ${r.started})`,
+      `${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid}, since ${r.started})${r.muted ? " [muted]" : ""}`,
     );
+  }
+}
+
+// --- mute / unmute ------------------------------------------------------------
+
+/** Live sessions selected by --session (name or id) and/or --project. Requires
+ * at least one selector so `mute` never silently targets every session. */
+function resolveMuteTargets(
+  flags: Record<string, string | boolean>,
+): Registration[] {
+  const session = typeof flags.session === "string" ? flags.session : undefined;
+  const project =
+    typeof flags.project === "string"
+      ? resolveProjectArg(flags.project)
+      : undefined;
+  if (!session && !project) {
+    console.error(
+      "usage: agent-mail mute|unmute (--session <name-or-id> | --project <dir>)",
+    );
+    process.exit(1);
+  }
+  const names = claudeSessions();
+  return listLive().filter((r) => {
+    if (project && canonicalProject(r.cwd) !== project) return false;
+    if (
+      session &&
+      r.sessionId !== session &&
+      sessionLabel(r, names) !== session
+    )
+      return false;
+    return true;
+  });
+}
+
+function cmdSetMuted(
+  flags: Record<string, string | boolean>,
+  muted: boolean,
+): void {
+  const targets = resolveMuteTargets(flags);
+  const names = claudeSessions();
+  if (targets.length === 0) {
+    console.error("no matching live session");
+    const live = listLive();
+    if (live.length) {
+      console.error("live sessions:");
+      for (const r of live)
+        console.error(`  ${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid})`);
+    }
+    process.exit(1);
+  }
+  const verb = muted ? "muted" : "unmuted";
+  for (const r of targets) {
+    setMuted(r.cwd, r.pid, muted);
+    console.log(`${verb} ${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid})`);
   }
 }
 
@@ -567,6 +624,8 @@ Messaging:
   mark-read [--project <dir>] (--id <message-id> | --all)
                         Mark messages read
   listeners             List live sessions
+  mute | unmute (--session <name-or-id> | --project <dir>)
+                        Pause / resume channel push for matching sessions
 
 Dashboards:
   dashboard [--port N] [--open] [--no-tui]
@@ -607,6 +666,12 @@ switch (cmd) {
     break;
   case "listeners":
     cmdListeners();
+    break;
+  case "mute":
+    cmdSetMuted(flags, true);
+    break;
+  case "unmute":
+    cmdSetMuted(flags, false);
     break;
   case "start":
     cmdStart();
