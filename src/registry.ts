@@ -14,7 +14,10 @@ export interface Registration {
   cwd: string;
   pid: number; // channel-server process; dies with the host session
   sessionId?: string; // host session id (Claude Code's; a random uuid under Codex)
-  name?: string; // session name snapshot at register time (may go stale on rename)
+  name?: string; // session name snapshot at register time; NOT used for display
+  // (may be stale on rename, or a legacy synthetic id) — display re-derives from
+  // the live Claude name or a pronounceable alias off the session id
+
   client?: string; // host client from MCP clientInfo: "claude-code", "codex", ...
   muted?: boolean; // channel push paused; messages still spool and flush on unmute
   started: string; // ISO 8601

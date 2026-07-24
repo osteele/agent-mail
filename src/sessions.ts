@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { loadSessionAliases } from "./config.ts";
 
 const SESSIONS_DIR = join(
   process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"),
@@ -21,6 +22,9 @@ const SESSIONS_DIR = join(
 export interface ClaudeSessionMeta {
   name?: string;
   status?: string;
+  /** Claude Code's provenance for `name`: "derived" = auto-generated
+   * `<project>-<hex>`; anything else (or a `/rename`) is a deliberate label. */
+  nameSource?: string;
 }
 
 const ONSETS = [
@@ -68,11 +72,18 @@ export function claudeSessions(): Map<string, ClaudeSessionMeta> {
     try {
       const doc = JSON.parse(
         readFileSync(join(SESSIONS_DIR, file), "utf8"),
-      ) as { sessionId?: unknown; name?: unknown; status?: unknown };
+      ) as {
+        sessionId?: unknown;
+        name?: unknown;
+        status?: unknown;
+        nameSource?: unknown;
+      };
       if (typeof doc.sessionId !== "string") continue;
       map.set(doc.sessionId, {
         name: typeof doc.name === "string" ? doc.name : undefined,
         status: typeof doc.status === "string" ? doc.status : undefined,
+        nameSource:
+          typeof doc.nameSource === "string" ? doc.nameSource : undefined,
       });
     } catch {
       // partially-written or malformed session file; skip
@@ -81,25 +92,65 @@ export function claudeSessions(): Map<string, ClaudeSessionMeta> {
   return map;
 }
 
-/** Human-readable name for a sessionId, if Claude Code recorded one. */
-export function sessionName(sessionId: string): string | undefined {
-  return claudeSessions().get(sessionId)?.name;
-}
-
-/** Deterministic, pronounceable fallback for sessions without a `/rename`.
- *
- * The raw session id remains the durable address; this is just a compact alias
- * for humans and dashboards. */
+/** Deterministic, pronounceable fallback used only when no project base can be
+ * derived (no cwd and no name). The raw session id remains the durable address. */
 export function generatedSessionName(sessionId: string): string {
   const bytes = createHash("sha256").update(sessionId).digest();
   return `${syllable(bytes, 0)}${syllable(bytes, 3)}-${syllable(bytes, 6)}${syllable(bytes, 9)}`;
 }
 
-/** Prefer an explicit Claude Code `/rename`; otherwise use the generated alias. */
+/** One short, pronounceable syllable off the session id — the readable stand-in
+ * for Claude's `-7a`/`-43` hex suffix. Low entropy is fine: a handful of
+ * sessions per project. */
+function readableSuffix(sessionId: string): string {
+  return syllable(createHash("sha256").update(sessionId).digest(), 0);
+}
+
+/** Project base (directory basename) for a session's label, mapped through the
+ * short-alias table, e.g. `llm-performance-models` -> `augur`. */
+function projectBase(cwd: string, aliases: Map<string, string>): string {
+  const base = cwd.split("/").filter(Boolean).pop() ?? "root";
+  return aliases.get(base) ?? base;
+}
+
+let aliasCache: Map<string, string> | undefined;
+/** Reload the memoized session-alias table (call after a config change). */
+export function resetSessionAliasCache(): void {
+  aliasCache = undefined;
+}
+function sessionAliases(): Map<string, string> {
+  aliasCache ??= loadSessionAliases();
+  return aliasCache;
+}
+
+/** Whether a Claude session name is auto-derived (`<base>-<hex>`) rather than a
+ * deliberate `/rename`. Trusts `nameSource` when present; otherwise falls back
+ * to the `<basename>-<2 alnum>` shape. */
+function isDerivedName(
+  name: string,
+  nameSource: string | undefined,
+  cwd?: string,
+): boolean {
+  if (nameSource) return nameSource === "derived";
+  const base = cwd?.split("/").filter(Boolean).pop();
+  return base ? new RegExp(`^${base}-[0-9a-z]{2}$`).test(name) : false;
+}
+
+/** Humanized label for a session.
+ *
+ * - A deliberate `/rename` (non-derived Claude name) is kept verbatim.
+ * - Otherwise (Claude's auto `<base>-<hex>`, or no Claude name): a stable
+ *   `<aliased-base>-<readable-suffix>` — the project stays recognizable, the
+ *   suffix is pronounceable instead of hex.
+ * - As a last resort (no cwd and no name) a fully generated alias is used. */
 export function sessionDisplayName(
   sessionId: string,
-  explicitName?: string,
+  meta?: { name?: string; nameSource?: string },
+  cwd?: string,
 ): string {
-  const name = explicitName?.trim();
-  return name || generatedSessionName(sessionId);
+  const name = meta?.name?.trim();
+  if (name && !isDerivedName(name, meta?.nameSource, cwd)) return name;
+  if (cwd)
+    return `${projectBase(cwd, sessionAliases())}-${readableSuffix(sessionId)}`;
+  return generatedSessionName(sessionId);
 }

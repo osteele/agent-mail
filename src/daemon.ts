@@ -22,6 +22,11 @@ import {
 } from "./paths.ts";
 import { listLive } from "./registry.ts";
 import {
+  claudeSessions,
+  resetSessionAliasCache,
+  sessionDisplayName,
+} from "./sessions.ts";
+import {
   type Message,
   appendMessage,
   markAllMessagesRead,
@@ -48,7 +53,12 @@ function slackDate(ts: string): string {
 
 async function echoToSlack(msg: Message): Promise<void> {
   if (config.slackEcho === "none" || !config.slackWebhook) return;
-  const sender = displayName(msg.from);
+  // A message from a session shows its humanized session label (which already
+  // carries the project base); one from the CLI/weft shows its `from` label.
+  const senderSid = msg.meta?.sessionId;
+  const sender = senderSid
+    ? sessionDisplayName(senderSid, claudeSessions().get(senderSid), msg.from)
+    : displayName(msg.from);
   const recipient = displayName(msg.project);
   const listening = listLive().some(
     (r) => canonicalProject(r.cwd) === msg.project,
@@ -186,6 +196,7 @@ log(`daemon started pid=${process.pid} port=${config.port}`);
 
 process.on("SIGHUP", () => {
   config = loadConfig();
+  resetSessionAliasCache();
   log(
     `config reloaded (slack: ${config.slackWebhook ? config.slackEcho : "unconfigured"})`,
   );

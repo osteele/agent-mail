@@ -40,6 +40,24 @@ function parseFlatToml(text: string): Record<string, string> {
   return out;
 }
 
+/** Short display aliases for project bases in session labels, so a long project
+ * name reads compactly (e.g. `llm-performance-models` -> `augur`). Configured as
+ * a comma list of `from=to` pairs in `session_aliases`, or the
+ * `AGENT_MAIL_SESSION_ALIASES` env var. Keyed by the project directory basename. */
+export function loadSessionAliases(): Map<string, string> {
+  const raw = existsSync(CONFIG_PATH)
+    ? parseFlatToml(readFileSync(CONFIG_PATH, "utf8"))
+    : {};
+  const spec =
+    process.env.AGENT_MAIL_SESSION_ALIASES ?? raw.session_aliases ?? "";
+  const map = new Map<string, string>();
+  for (const pair of spec.split(",")) {
+    const [from, to] = pair.split("=").map((s) => s.trim());
+    if (from && to) map.set(from, to);
+  }
+  return map;
+}
+
 export function loadConfig(): Config {
   const raw = existsSync(CONFIG_PATH)
     ? parseFlatToml(readFileSync(CONFIG_PATH, "utf8"))

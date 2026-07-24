@@ -34,9 +34,11 @@ Mail is addressed to a **project directory**. Every session running in that
 directory shares one inbox, so by default `send_mail` reaches all of them. To
 reach one specific session, pass its name or id as `session` (discover targets
 with `list_sessions`); the others in that directory won't see it. A session is
-identified by `CLAUDE_CODE_SESSION_ID` and labelled with its Claude Code
-session name (set via `/rename`) when available, otherwise agent-mail derives a
-stable pronounceable alias from the session id.
+identified by `CLAUDE_CODE_SESSION_ID` and labelled `<project-base>-<suffix>`:
+the project directory basename (optionally shortened via `session_aliases`, see
+Configuration) plus a short pronounceable suffix derived from the session id, in
+place of Claude Code's `<project>-<hex>` auto-name. A deliberate `/rename` is
+shown verbatim instead.
 
 The project spool stores every message for that directory. Session-local views
 (`check_inbox`, `mark_read`, and channel push) filter it for the current
@@ -130,7 +132,15 @@ port = 8377
 # slack_echo = "all"   # or "none"
 # slack_bot_token = "xoxb-..."   # for `slack-dashboard` (chat:write scope)
 # slack_channel = "C0123ABCD"    # channel the dashboard posts/updates in
+# session_aliases = "llm-performance-models=augur, dependency-routing=deproute"
 ```
+
+`session_aliases` is a comma list of `basename=alias` pairs that shorten the
+project base in session labels (e.g. `augur-lon` instead of
+`llm-performance-models-lon`) across `listeners`, `list_sessions`, both
+dashboards, and the per-message Slack echo. Also settable via
+`AGENT_MAIL_SESSION_ALIASES`. Changes are picked up on daemon `graceful`
+(SIGHUP) and by each new CLI/dashboard invocation.
 
 Slack webhook resolution order: `AGENT_MAIL_SLACK_WEBHOOK` env var →
 `slack_webhook` in config.toml → `SLACK_WEBHOOK` in `~/.config/weft/config`.

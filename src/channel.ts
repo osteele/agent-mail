@@ -39,7 +39,7 @@ import {
   setMuted,
   unregister,
 } from "./registry.ts";
-import { claudeSessions, sessionDisplayName, sessionName } from "./sessions.ts";
+import { claudeSessions, sessionDisplayName } from "./sessions.ts";
 import {
   type Message,
   appendMessage,
@@ -55,8 +55,9 @@ const cwd = canonicalProject(process.cwd());
 // Used to distinguish multiple sessions in the same directory (which share one
 // spool) and to suppress self-echo of our own outgoing mail.
 const sessionId = process.env.CLAUDE_CODE_SESSION_ID ?? randomUUID();
-const myName = sessionName(sessionId);
-const myLabel = sessionDisplayName(sessionId, myName);
+const myMeta = claudeSessions().get(sessionId);
+const myName = myMeta?.name; // raw Claude name for the registry snapshot
+const myLabel = sessionDisplayName(sessionId, myMeta, cwd);
 const selfLabel = `${myLabel} (${sessionId})`;
 const config = loadConfig();
 const mySpool = spoolPath(cwd);
@@ -78,11 +79,12 @@ function liveSessions(dir?: string): {
     .filter((r) => r.sessionId && (!dir || canonicalProject(r.cwd) === dir))
     .map((r) => {
       const sid = r.sessionId as string;
-      const name = meta.get(sid)?.name ?? r.name;
+      // Live Claude meta + cwd; skip the possibly-stale registry `name` snapshot
+      // so a session reads as its aliased base + readable suffix.
       return {
         sessionId: sid,
         cwd: canonicalProject(r.cwd),
-        name: sessionDisplayName(sid, name),
+        name: sessionDisplayName(sid, meta.get(sid), canonicalProject(r.cwd)),
         status: meta.get(sid)?.status,
         client: r.client,
         muted: r.muted,

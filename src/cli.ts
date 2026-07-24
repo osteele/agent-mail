@@ -49,16 +49,16 @@ import {
   readMessages,
 } from "./spool.ts";
 
-/** Best-effort human label for a registry entry: fresh Claude Code name, then
- * the registered snapshot, then `<client> <short id>` (so a nameless Codex
- * session reads "codex 1a2b3c4d" rather than an anonymous id). */
+/** Best-effort human label for a registry entry: a deliberate `/rename` kept
+ * verbatim, else `<aliased-base>-<readable-suffix>` (from cwd + session id),
+ * else `<client>` for a session-less entry. The registry `name` snapshot is
+ * deliberately not used — it may be stale or a legacy synthetic id. */
 function sessionLabel(
-  r: { sessionId?: string; name?: string; client?: string },
+  r: { sessionId?: string; client?: string; cwd: string },
   names = claudeSessions(),
 ): string {
   if (!r.sessionId) return r.client ?? "unnamed";
-  const name = names.get(r.sessionId)?.name ?? r.name;
-  return sessionDisplayName(r.sessionId, name);
+  return sessionDisplayName(r.sessionId, names.get(r.sessionId), r.cwd);
 }
 
 const SRC_DIR = dirname(new URL(import.meta.url).pathname);
@@ -474,6 +474,8 @@ function cmdInstall(): void {
       `port = ${loadConfig().port}`,
       '# slack_webhook = "https://hooks.slack.com/services/..." (falls back to ~/.config/weft/config)',
       '# slack_echo = "all"  # or "none"',
+      "# Short aliases for long project bases in session labels (comma list):",
+      '# session_aliases = "llm-performance-models=augur, dependency-routing=deproute"',
       "# Editable Slack dashboard (agent-mail slack-dashboard) needs a bot token:",
       '# slack_bot_token = "xoxb-..."  # chat:write scope; invite the bot to the channel',
       '# slack_channel = "C0123ABCD"',
