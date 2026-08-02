@@ -1,5 +1,11 @@
 import { beforeEach, expect, test } from "bun:test";
-import { resetSessionAliasCache, sessionDisplayName } from "./sessions.ts";
+import {
+  activityTag,
+  formatAge,
+  lastActivityMs,
+  resetSessionAliasCache,
+  sessionDisplayName,
+} from "./sessions.ts";
 
 const SID = "1ed87600-aaaa-bbbb-cccc-000000000000";
 const CWD = "/Users/x/code/mental-spaces";
@@ -63,4 +69,34 @@ test("distinct sessions in one project get distinct suffixes", () => {
   const a = sessionDisplayName("sid-aaaa", undefined, CWD);
   const b = sessionDisplayName("sid-bbbb", undefined, CWD);
   expect(a).not.toBe(b);
+});
+
+// --- recency helpers ---------------------------------------------------------
+
+test("formatAge buckets: minutes, hours to 47h, then days", () => {
+  expect(formatAge(30_000)).toBe("<1m");
+  expect(formatAge(12 * 60_000)).toBe("12m");
+  expect(formatAge(26 * 3600_000)).toBe("26h"); // day-old still reads in hours
+  expect(formatAge(49 * 3600_000)).toBe("2d");
+});
+
+test("lastActivityMs takes the most recent of started/lastSeen/meta", () => {
+  const started = "2026-08-01T00:00:00.000Z";
+  const lastSeen = "2026-08-01T12:00:00.000Z";
+  const metaMs = Date.parse("2026-08-01T18:00:00.000Z");
+  expect(lastActivityMs({ started })).toBe(Date.parse(started));
+  expect(lastActivityMs({ started, lastSeen })).toBe(Date.parse(lastSeen));
+  expect(lastActivityMs({ started, lastSeen }, { updatedAt: metaMs })).toBe(
+    metaMs,
+  );
+});
+
+test("activityTag: busy wins; recent is active; old idle is flagged stale", () => {
+  const now = Date.parse("2026-08-02T12:00:00.000Z");
+  expect(activityTag("busy", now - 26 * 3600_000, now)).toBe("busy");
+  expect(activityTag(undefined, now - 30_000, now)).toBe("active");
+  expect(activityTag("idle", now - 3 * 3600_000, now)).toBe("idle 3h");
+  expect(activityTag("idle", now - 26 * 3600_000, now)).toBe(
+    "idle 26h — stale?",
+  );
 });

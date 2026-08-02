@@ -37,7 +37,12 @@ import {
   ensureDirs,
 } from "./paths.ts";
 import { type Registration, listLive, setMuted } from "./registry.ts";
-import { claudeSessions, sessionDisplayName } from "./sessions.ts";
+import {
+  activityTag,
+  claudeSessions,
+  lastActivityMs,
+  sessionDisplayName,
+} from "./sessions.ts";
 import {
   SlackDashboardUnconfigured,
   refreshSlackDashboard,
@@ -59,6 +64,12 @@ function sessionLabel(
 ): string {
   if (!r.sessionId) return r.client ?? "unnamed";
   return sessionDisplayName(r.sessionId, names.get(r.sessionId), r.cwd);
+}
+
+/** Recency tag ("busy" / "active" / "idle 26h — stale?") for a registry entry. */
+function sessionActivity(r: Registration, names = claudeSessions()): string {
+  const meta = r.sessionId ? names.get(r.sessionId) : undefined;
+  return activityTag(meta?.status, lastActivityMs(r, meta));
 }
 
 const SRC_DIR = dirname(new URL(import.meta.url).pathname);
@@ -206,7 +217,7 @@ async function cmdStatus(): Promise<void> {
   console.log(`listening sessions: ${live.length}`);
   for (const r of live)
     console.log(
-      `  ${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid})${r.muted ? " [muted]" : ""}`,
+      `  ${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid}) [${sessionActivity(r, names)}]${r.muted ? " [muted]" : ""}`,
     );
 }
 
@@ -362,7 +373,7 @@ function cmdListeners(): void {
   const names = claudeSessions();
   for (const r of live) {
     console.log(
-      `${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid}, since ${r.started})${r.muted ? " [muted]" : ""}`,
+      `${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid}, since ${r.started}) [${sessionActivity(r, names)}]${r.muted ? " [muted]" : ""}`,
     );
   }
 }

@@ -37,9 +37,15 @@ import {
   listLive,
   register,
   setMuted,
+  touch,
   unregister,
 } from "./registry.ts";
-import { claudeSessions, sessionDisplayName } from "./sessions.ts";
+import {
+  activityTag,
+  claudeSessions,
+  lastActivityMs,
+  sessionDisplayName,
+} from "./sessions.ts";
 import {
   type Message,
   appendMessage,
@@ -69,7 +75,7 @@ function liveSessions(dir?: string): {
   sessionId: string;
   cwd: string;
   name: string;
-  status?: string;
+  activity: string;
   client?: string;
   muted?: boolean;
   pid: number;
@@ -79,13 +85,14 @@ function liveSessions(dir?: string): {
     .filter((r) => r.sessionId && (!dir || canonicalProject(r.cwd) === dir))
     .map((r) => {
       const sid = r.sessionId as string;
+      const m = meta.get(sid);
       // Live Claude meta + cwd; skip the possibly-stale registry `name` snapshot
       // so a session reads as its aliased base + readable suffix.
       return {
         sessionId: sid,
         cwd: canonicalProject(r.cwd),
-        name: sessionDisplayName(sid, meta.get(sid), canonicalProject(r.cwd)),
-        status: meta.get(sid)?.status,
+        name: sessionDisplayName(sid, m, canonicalProject(r.cwd)),
+        activity: activityTag(m?.status, lastActivityMs(r, m)),
         client: r.client,
         muted: r.muted,
         pid: r.pid,
@@ -115,7 +122,7 @@ function describeSessions(
   sessions: {
     sessionId: string;
     name: string;
-    status?: string;
+    activity: string;
     client?: string;
     muted?: boolean;
   }[],
@@ -123,7 +130,7 @@ function describeSessions(
   return sessions
     .map(
       (s) =>
-        `  - ${s.name} (${s.sessionId})${s.client ? ` <${s.client}>` : ""}${s.status ? ` [${s.status}]` : ""}${s.muted ? " [muted]" : ""}`,
+        `  - ${s.name} (${s.sessionId})${s.client ? ` <${s.client}>` : ""} [${s.activity}]${s.muted ? " [muted]" : ""}`,
     )
     .join("\n");
 }
@@ -176,8 +183,11 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "list_sessions",
       description:
-        "List live agent sessions (mail targets) and their names/ids. " +
-        "Optionally scope to one project directory.",
+        "List attached agent sessions (mail targets) and their names/ids. " +
+        "Optionally scope to one project directory. Attached does not mean " +
+        "active: each entry shows how recently the session did anything " +
+        "(busy / active / idle <age>) — treat long-idle sessions as probably " +
+        "vacant even though mail to them will be delivered.",
       inputSchema: {
         type: "object",
         properties: {
@@ -259,6 +269,9 @@ async function deliver(msg: Message): Promise<string> {
 }
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
+  // Every tool call is a sign of life; stamp it so peers see fresh idle times
+  // (Codex sessions have no Claude session meta, so this is their only signal).
+  touch(cwd, process.pid);
   if (req.params.name === "send_mail") {
     const { project, message, session, reply_to } = req.params.arguments as {
       project: string;
@@ -339,7 +352,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
             ? sessions
                 .map(
                   (s) =>
-                    `${s.name} (${s.sessionId})${s.client ? ` <${s.client}>` : ""} — ${s.cwd}${s.status ? ` [${s.status}]` : ""}${s.muted ? " [muted]" : ""}${s.sessionId === sessionId ? " (you)" : ""}`,
+                    `${s.name} (${s.sessionId})${s.client ? ` <${s.client}>` : ""} — ${s.cwd} [${s.activity}]${s.muted ? " [muted]" : ""}${s.sessionId === sessionId ? " (you)" : ""}`,
                 )
                 .join("\n")
             : "no sessions listening",

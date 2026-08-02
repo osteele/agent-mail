@@ -25,6 +25,9 @@ export interface ClaudeSessionMeta {
   /** Claude Code's provenance for `name`: "derived" = auto-generated
    * `<project>-<hex>`; anything else (or a `/rename`) is a deliberate label. */
   nameSource?: string;
+  /** Epoch ms of the session's most recent update (max of the file's
+   * `updatedAt` / `statusUpdatedAt`) — the activity signal for idle times. */
+  updatedAt?: number;
 }
 
 const ONSETS = [
@@ -77,13 +80,19 @@ export function claudeSessions(): Map<string, ClaudeSessionMeta> {
         name?: unknown;
         status?: unknown;
         nameSource?: unknown;
+        updatedAt?: unknown;
+        statusUpdatedAt?: unknown;
       };
       if (typeof doc.sessionId !== "string") continue;
+      const stamps = [doc.updatedAt, doc.statusUpdatedAt].filter(
+        (v): v is number => typeof v === "number" && Number.isFinite(v),
+      );
       map.set(doc.sessionId, {
         name: typeof doc.name === "string" ? doc.name : undefined,
         status: typeof doc.status === "string" ? doc.status : undefined,
         nameSource:
           typeof doc.nameSource === "string" ? doc.nameSource : undefined,
+        updatedAt: stamps.length ? Math.max(...stamps) : undefined,
       });
     } catch {
       // partially-written or malformed session file; skip
@@ -153,4 +162,55 @@ export function sessionDisplayName(
   if (cwd)
     return `${projectBase(cwd, sessionAliases())}-${readableSuffix(sessionId)}`;
   return generatedSessionName(sessionId);
+}
+
+// --- Session recency ---------------------------------------------------------
+//
+// "Attached" (channel server alive, will receive push) and "present" (the agent
+// has done anything recently) diverge exactly when a session sits idle for a
+// long time — which misleads peers into overcounting active agents. These
+// helpers turn the available signals into an idle-time tag every surface shows.
+
+/** Most recent sign of life, epoch ms: Claude's session-meta update time, the
+ * registry `lastSeen` (stamped on tool calls), or the registration time. */
+export function lastActivityMs(
+  reg: { started: string; lastSeen?: string },
+  meta?: ClaudeSessionMeta,
+): number {
+  const candidates = [
+    Date.parse(reg.started),
+    reg.lastSeen ? Date.parse(reg.lastSeen) : Number.NaN,
+    meta?.updatedAt ?? Number.NaN,
+  ].filter(Number.isFinite);
+  return candidates.length ? Math.max(...candidates) : 0;
+}
+
+/** Compact age: "<1m", "12m", "26h", "3d". Hours run to 47h so day-old
+ * sessions still read in hours. */
+export function formatAge(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return "<1m";
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${hours}h`;
+  return `${Math.floor(hours / 24)}d`;
+}
+
+const ACTIVE_MS = 2 * 60_000;
+const STALE_MS = 24 * 3600_000;
+
+/** Presence tag: "busy" (Claude reports it mid-turn), "active" (signs of life
+ * within the last two minutes), else "idle <age>" — flagged "stale?" once
+ * nothing has happened for a day, so peers discount attached-but-vacant
+ * sessions instead of counting them as active agents. */
+export function activityTag(
+  status: string | undefined,
+  lastActiveMs: number,
+  nowMs = Date.now(),
+): string {
+  if (status === "busy") return "busy";
+  const age = nowMs - lastActiveMs;
+  if (age < ACTIVE_MS) return "active";
+  const tag = `idle ${formatAge(age)}`;
+  return age >= STALE_MS ? `${tag} — stale?` : tag;
 }

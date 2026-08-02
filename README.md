@@ -22,7 +22,10 @@ notifications).
   `mute_notifications` / `unmute_notifications` tools, which work even without
   channel push.
 - **Registry** (`~/.claude/agent-mail/registry/`): which sessions are
-  listening (`cwd`, `pid`, `sessionId`, `name`), pruned by pid liveness.
+  listening (`cwd`, `pid`, `sessionId`, `name`). Entries are pruned when the
+  process is gone *or* when its pid has been recycled by an unrelated process
+  (the entry records the process start time at registration and compares it on
+  every listing).
 - **Dashboards** (`src/dashboard.ts`, `src/slackDashboard.ts`): read the spools
   and registry directly (no daemon dependency) via a shared aggregation
   (`src/dashboardData.ts`) and render them as a local web page or an editable
@@ -51,6 +54,18 @@ Each session also records its **host client** — `claude-code` or `codex` —
 captured from the MCP handshake and shown in `status`, `list_sessions`, and the
 dashboard. Codex sets no session env var, so Codex sessions get a per-process
 random id and a generated alias.
+
+### Presence
+
+A listed session is **attached** (its channel server is alive and mail to it
+will be delivered), which is not the same as **active** — a terminal left open
+overnight stays attached with nobody home. So every surface (`list_sessions`,
+`listeners`, `status`, both dashboards) tags each session with its recency:
+`[busy]` (Claude reports it mid-turn), `[active]` (signs of life within the
+last two minutes), or `[idle <age>]`, flagged `stale?` after a day. Recency is
+the most recent of: Claude Code's own session-activity timestamp, the last
+agent-mail tool call the session made, and its registration time. Treat
+long-idle sessions as probably vacant rather than as active agents.
 
 Delivery tiers: channel-enabled sessions get push; running sessions without
 the flag can arm a Monitor on their spool file; everything else reads the
@@ -98,7 +113,7 @@ still work.)
 agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to <id>]
 agent-mail inbox [--project <dir>] [--limit N] [--unread]
 agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
-agent-mail listeners                  # live sessions
+agent-mail listeners                  # attached sessions + idle times
 agent-mail mute|unmute (--session <name-or-id> | --project <dir>)  # pause/resume push
 agent-mail dashboard [--port N] [--open] [--no-tui]   # web dashboard
 agent-mail slack-dashboard [--watch <seconds>]        # editable Slack dashboard

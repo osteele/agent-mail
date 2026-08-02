@@ -60,7 +60,7 @@ function buildBlocks(state: DashboardState): object[] {
         .map(
           (p) =>
             `🟢 *${p.project}* — ${p.label}` +
-            `${p.status ? ` _[${p.status}]_` : ""}` +
+            `${p.activity ? ` _[${p.activity}]_` : ""}` +
             `${p.muted ? " 🔕" : ""}`,
         )
         .join("\n")
