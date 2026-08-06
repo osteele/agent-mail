@@ -14,17 +14,20 @@
  *   ("claude-code"/"codex") from the MCP clientInfo once the handshake lands.
  * - Tools: send_mail, list_sessions, check_inbox, mark_read, and
  *   mute_notifications / unmute_notifications (pause/resume this session's
- *   channel push — mail keeps spooling while muted and flushes on unmute).
+ *   channel push — mail keeps spooling while muted and flushes on unmute),
+ *   plus experiment-number and file/directory coordination claims.
  */
 
 import { randomUUID } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { type Claim, claims } from "./claims.ts";
 import { loadConfig } from "./config.ts";
 import {
   canonicalProject,
@@ -67,6 +70,12 @@ const myLabel = sessionDisplayName(sessionId, myMeta, cwd);
 const selfLabel = `${myLabel} (${sessionId})`;
 const config = loadConfig();
 const mySpool = spoolPath(cwd);
+const claimOwner = {
+  id: sessionId,
+  label: myLabel,
+  sessionId,
+  pid: process.pid,
+};
 
 /** Live sessions (pid-pruned registry), enriched with fresh Claude Code names.
  * Only entries with a known sessionId are returned — older sessions that
@@ -142,7 +151,7 @@ const mcp = new Server(
       experimental: { "claude/channel": {} },
       tools: {},
     },
-    instructions: `Local mail between coding agents. You are session ${selfLabel} in ${cwd}. Use check_inbox for recent/unread mail, mark_read after acting, and send_mail to contact another project. Multiple sessions in one directory share an inbox; to reach a specific one, pass its name or id as \`session\` to send_mail, and use list_sessions to discover targets. Call mute_notifications to pause channel push (incoming mail keeps spooling and stays visible to check_inbox); unmute_notifications flushes anything held and resumes push.`,
+    instructions: `Local mail and filesystem coordination between coding agents. You are session ${selfLabel} in ${cwd}. Use check_inbox for recent/unread mail, mark_read after acting, and send_mail to contact another project. Multiple sessions in one directory share an inbox; to reach a specific one, pass its name or id as \`session\` to send_mail, and use list_sessions to discover targets. Before creating a lab-notebook experiment, call claim_experiment; before editing a file or directory another agent may touch, call claim_path. Release each claim after creating the experiment file or finishing the edit. Call mute_notifications to pause channel push (incoming mail keeps spooling and stays visible to check_inbox); unmute_notifications flushes anything held and resumes push.`,
   },
 );
 
@@ -248,8 +257,74 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         "arrived while muted.",
       inputSchema: { type: "object", properties: {} },
     },
+    {
+      name: "claim_experiment",
+      description:
+        "Atomically reserve the next sequential EXP-NNN number in a research " +
+        "lab notebook. The default notebook is ./lab-notebook when present, " +
+        "otherwise the project root. Create the experiment file, then call " +
+        "release_claim with the returned claim id; the file keeps the number reserved.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          notebook: {
+            type: "string",
+            description:
+              "Optional lab-notebook directory, absolute or relative to the project",
+          },
+        },
+      },
+    },
+    {
+      name: "claim_path",
+      description:
+        "Claim a project file or directory before editing it. A directory " +
+        "claim conflicts with claims on any descendant; all claims conflict " +
+        "with a claimed ancestor. Release it when the edit or handoff is complete.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Project path, absolute or relative to the project",
+          },
+          directory: {
+            type: "boolean",
+            description:
+              "Claim the path as a directory (default false; required for a nonexistent directory)",
+          },
+        },
+        required: ["path"],
+      },
+    },
+    {
+      name: "list_claims",
+      description:
+        "List active experiment-number and path claims for this project, including owners and claim ids.",
+      inputSchema: { type: "object", properties: {} },
+    },
+    {
+      name: "release_claim",
+      description:
+        "Release one of this session's experiment-number or path claims by claim id.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          claim_id: { type: "string", description: "Claim id to release" },
+        },
+        required: ["claim_id"],
+      },
+    },
   ],
 }));
+
+function describeClaim(claim: Claim): string {
+  const resource =
+    claim.type === "experiment"
+      ? `${claim.experimentId} (${claim.notebook})`
+      : `${claim.pathType} ${claim.path}`;
+  return `${claim.id} ${resource} — ${claim.owner.label} [${claim.createdAt}]`;
+}
 
 async function deliver(msg: Message): Promise<string> {
   // Prefer the daemon (gets the Slack echo); fall back to direct append.
@@ -438,6 +513,63 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       ],
     };
   }
+  if (req.params.name === "claim_experiment") {
+    const { notebook } = (req.params.arguments ?? {}) as { notebook?: string };
+    const notebookPath = notebook
+      ? resolve(cwd, notebook)
+      : existsSync(join(cwd, "lab-notebook"))
+        ? join(cwd, "lab-notebook")
+        : cwd;
+    const claim = claims.claimExperiment(cwd, notebookPath, claimOwner);
+    return {
+      content: [
+        {
+          type: "text",
+          text: `${claim.experimentId} claimed (claim ${claim.id}). Create the experiment file, then release this claim.`,
+        },
+      ],
+    };
+  }
+  if (req.params.name === "claim_path") {
+    const { path, directory } = req.params.arguments as {
+      path: string;
+      directory?: boolean;
+    };
+    const claim = claims.claimPath(
+      cwd,
+      resolve(cwd, path),
+      directory ? "directory" : "file",
+      claimOwner,
+    );
+    return {
+      content: [
+        {
+          type: "text",
+          text: `${claim.pathType} claimed: ${claim.path} (claim ${claim.id})`,
+        },
+      ],
+    };
+  }
+  if (req.params.name === "list_claims") {
+    const active = claims.list(cwd);
+    return {
+      content: [
+        {
+          type: "text",
+          text: active.length
+            ? active.map(describeClaim).join("\n")
+            : "no active claims",
+        },
+      ],
+    };
+  }
+  if (req.params.name === "release_claim") {
+    const { claim_id } = req.params.arguments as { claim_id: string };
+    const claim = claims.release(cwd, claim_id, sessionId);
+    return {
+      content: [{ type: "text", text: `released ${describeClaim(claim)}` }],
+    };
+  }
   throw new Error(`unknown tool: ${req.params.name}`);
 });
 
@@ -496,6 +628,7 @@ const timer = setInterval(() => void poll(), 1000);
 
 function shutdown(): void {
   clearInterval(timer);
+  claims.releaseOwner(cwd, sessionId);
   unregister(cwd, process.pid);
   process.exit(0);
 }

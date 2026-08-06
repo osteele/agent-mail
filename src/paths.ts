@@ -4,6 +4,7 @@
  *   inbox/<slug>.jsonl     per-project message spools (source of truth)
  *   read/<slug>.json        per-project read message ids
  *   registry/<id>.json     live channel-server registrations
+ *   claims/<slug>/          experiment-number and path claims
  *   daemon.pid, daemon.log daemon state
  * Config:     ~/.config/agent-mail/config.toml
  */
@@ -17,6 +18,7 @@ export const STATE_DIR = join(homedir(), ".claude", "agent-mail");
 export const INBOX_DIR = join(STATE_DIR, "inbox");
 export const READ_DIR = join(STATE_DIR, "read");
 export const REGISTRY_DIR = join(STATE_DIR, "registry");
+export const CLAIMS_DIR = join(STATE_DIR, "claims");
 export const CONFIG_DIR = join(homedir(), ".config", "agent-mail");
 export const CONFIG_PATH = join(CONFIG_DIR, "config.toml");
 export const PID_PATH = join(STATE_DIR, "daemon.pid");
@@ -33,6 +35,7 @@ export function ensureDirs(): void {
     INBOX_DIR,
     READ_DIR,
     REGISTRY_DIR,
+    CLAIMS_DIR,
     CONFIG_DIR,
   ]) {
     mkdirSync(dir, { recursive: true });

@@ -7,6 +7,10 @@
  *   agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
  *   agent-mail listeners
  *   agent-mail mute|unmute (--session <name-or-id> | --project <dir>)
+ *   agent-mail claim-experiment [--project <dir>] [--notebook <dir>]
+ *   agent-mail claim-path --path <path> [--directory] [--project <dir>]
+ *   agent-mail claims [--project <dir>]
+ *   agent-mail release-claim --id <claim-id> [--project <dir>]
  *
  * Dashboards:
  *   agent-mail dashboard [--port N] [--open] [--no-tui]
@@ -24,7 +28,8 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { type Claim, type ClaimOwner, claims } from "./claims.ts";
 import { loadConfig } from "./config.ts";
 import { openBrowser, serveDashboard } from "./dashboard.ts";
 import {
@@ -378,6 +383,83 @@ function cmdListeners(): void {
   }
 }
 
+// --- coordination claims -----------------------------------------------------
+
+function claimProject(flags: Record<string, string | boolean>): string {
+  return typeof flags.project === "string"
+    ? resolveProjectArg(flags.project)
+    : canonicalProject(process.cwd());
+}
+
+function cliOwner(flags: Record<string, string | boolean>): ClaimOwner {
+  const label = typeof flags.owner === "string" ? flags.owner : "cli";
+  return {
+    id:
+      typeof flags.owner === "string"
+        ? `cli:${flags.owner}`
+        : `cli:${process.pid}`,
+    label,
+    pid: process.pid,
+  };
+}
+
+function describeClaim(claim: Claim): string {
+  const resource =
+    claim.type === "experiment"
+      ? `${claim.experimentId} (${claim.notebook})`
+      : `${claim.pathType} ${claim.path}`;
+  return `${claim.id} ${resource} — ${claim.owner.label} [${claim.createdAt}]`;
+}
+
+function cmdClaimExperiment(flags: Record<string, string | boolean>): void {
+  const project = claimProject(flags);
+  const notebook =
+    typeof flags.notebook === "string"
+      ? resolve(project, flags.notebook)
+      : existsSync(join(project, "lab-notebook"))
+        ? join(project, "lab-notebook")
+        : project;
+  const claim = claims.claimExperiment(project, notebook, cliOwner(flags));
+  console.log(`${claim.experimentId} ${claim.id}`);
+}
+
+function cmdClaimPath(flags: Record<string, string | boolean>): void {
+  if (typeof flags.path !== "string") {
+    console.error(
+      "usage: agent-mail claim-path --path <path> [--directory] [--project <dir>] [--owner <label>]",
+    );
+    process.exit(1);
+  }
+  const project = claimProject(flags);
+  const claim = claims.claimPath(
+    project,
+    resolve(project, flags.path),
+    flags.directory === true ? "directory" : "file",
+    cliOwner(flags),
+  );
+  console.log(`${claim.id} ${claim.pathType} ${claim.path}`);
+}
+
+function cmdClaims(flags: Record<string, string | boolean>): void {
+  const active = claims.list(claimProject(flags));
+  if (active.length === 0) {
+    console.log("no active claims");
+    return;
+  }
+  for (const claim of active) console.log(describeClaim(claim));
+}
+
+function cmdReleaseClaim(flags: Record<string, string | boolean>): void {
+  if (typeof flags.id !== "string") {
+    console.error(
+      "usage: agent-mail release-claim --id <claim-id> [--project <dir>]",
+    );
+    process.exit(1);
+  }
+  const claim = claims.release(claimProject(flags), flags.id);
+  console.log(`released ${describeClaim(claim)}`);
+}
+
 // --- mute / unmute ------------------------------------------------------------
 
 /** Live sessions selected by --session (name or id) and/or --project. Requires
@@ -640,6 +722,16 @@ Messaging:
   mute | unmute (--session <name-or-id> | --project <dir>)
                         Pause / resume channel push for matching sessions
 
+Coordination:
+  claim-experiment [--project <dir>] [--notebook <dir>] [--owner <label>]
+                        Atomically reserve the next EXP-NNN number
+  claim-path --path <path> [--directory] [--project <dir>] [--owner <label>]
+                        Claim a file or directory against overlapping edits
+  claims [--project <dir>]
+                        List active claims
+  release-claim --id <claim-id> [--project <dir>]
+                        Release a claim
+
 Dashboards:
   dashboard [--port N] [--open] [--no-tui]
                         Serve the web dashboard (press o to open, q to quit)
@@ -685,6 +777,18 @@ switch (cmd) {
     break;
   case "unmute":
     cmdSetMuted(flags, false);
+    break;
+  case "claim-experiment":
+    cmdClaimExperiment(flags);
+    break;
+  case "claim-path":
+    cmdClaimPath(flags);
+    break;
+  case "claims":
+    cmdClaims(flags);
+    break;
+  case "release-claim":
+    cmdReleaseClaim(flags);
     break;
   case "start":
     cmdStart();
