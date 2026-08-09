@@ -25,13 +25,25 @@
  *   agent-mail uninstall
  */
 
-import { execFileSync, spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { type Claim, type ClaimOwner, claims } from "./claims.ts";
 import { loadConfig } from "./config.ts";
 import { openBrowser, serveDashboard } from "./dashboard.ts";
+import {
+  addNativeAuditHook,
+  claudeRegistrationMatches,
+  codexRegistrationMatches,
+  removeNativeAuditHook,
+} from "./integrations.ts";
 import {
   CONFIG_PATH,
   LAUNCHD_LABEL,
@@ -100,6 +112,7 @@ function sessionActivity(r: Registration, names = claudeSessions()): string {
 const SRC_DIR = dirname(new URL(import.meta.url).pathname);
 const DAEMON_TS = join(SRC_DIR, "daemon.ts");
 const CHANNEL_TS = join(SRC_DIR, "channel.ts");
+const NATIVE_AUDIT_TS = join(SRC_DIR, "nativeAudit.ts");
 const PLIST_PATH = join(
   homedir(),
   "Library",
@@ -107,6 +120,10 @@ const PLIST_PATH = join(
   `${LAUNCHD_LABEL}.plist`,
 );
 const CLAUDE_JSON = join(homedir(), ".claude.json");
+const CLAUDE_SETTINGS = join(
+  process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"),
+  "settings.json",
+);
 
 function bunPath(): string {
   return process.execPath; // the bun binary running this script
@@ -653,7 +670,7 @@ function plistContents(): string {
 `;
 }
 
-function registerMcpServer(): void {
+function registerMcpServer(replace: boolean): void {
   if (!existsSync(CLAUDE_JSON)) {
     console.error(`${CLAUDE_JSON} not found; skipping mcpServers registration`);
     return;
@@ -663,6 +680,20 @@ function registerMcpServer(): void {
     unknown
   >;
   const servers = (doc.mcpServers ?? {}) as Record<string, unknown>;
+  const existing = servers["agent-mail"];
+  if (existing) {
+    if (claudeRegistrationMatches(existing, bunPath(), CHANNEL_TS)) {
+      console.log("Claude MCP registration already matches this checkout");
+      return;
+    }
+    if (!replace) {
+      console.error(
+        "Claude already has a different agent-mail MCP entry; leaving it unchanged " +
+          "(pass --replace-claude to replace it)",
+      );
+      return;
+    }
+  }
   servers["agent-mail"] = {
     type: "stdio",
     command: bunPath(),
@@ -674,7 +705,127 @@ function registerMcpServer(): void {
   console.log(`registered agent-mail in ${CLAUDE_JSON} mcpServers`);
 }
 
-function cmdInstall(): void {
+type CodexRegistration =
+  | { status: "unavailable" }
+  | { status: "absent" }
+  | { status: "invalid"; detail: string }
+  | { status: "present"; value: unknown };
+
+function codexRegistration(): CodexRegistration {
+  const result = spawnSync("codex", ["mcp", "get", "agent-mail", "--json"], {
+    encoding: "utf8",
+  });
+  if (result.error) return { status: "unavailable" };
+  if (result.status !== 0) return { status: "absent" };
+  try {
+    return { status: "present", value: JSON.parse(result.stdout) as unknown };
+  } catch (error) {
+    if (!(error instanceof SyntaxError)) throw error;
+    return { status: "invalid", detail: error.message };
+  }
+}
+
+function runCodexMcp(args: string[]): boolean {
+  const result = spawnSync("codex", ["mcp", ...args], {
+    encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.error) {
+    console.error(`codex unavailable: ${result.error.message}`);
+    return false;
+  }
+  if (result.status !== 0) {
+    console.error(result.stderr.trim() || `codex mcp ${args[0]} failed`);
+    return false;
+  }
+  return true;
+}
+
+function registerCodex(replace: boolean): void {
+  const registration = codexRegistration();
+  if (registration.status === "unavailable") {
+    console.error("codex not found; skipping Codex MCP registration");
+    return;
+  }
+  if (registration.status === "invalid") {
+    console.error(
+      `could not inspect the Codex agent-mail entry: ${registration.detail}`,
+    );
+    return;
+  }
+  if (registration.status === "present") {
+    if (codexRegistrationMatches(registration.value, bunPath(), CHANNEL_TS)) {
+      console.log("Codex MCP registration already matches this checkout");
+      return;
+    }
+    if (!replace) {
+      console.error(
+        "Codex already has a different agent-mail MCP entry; leaving it unchanged " +
+          "(pass --replace-codex to replace it)",
+      );
+      return;
+    }
+    if (!runCodexMcp(["remove", "agent-mail"])) return;
+  }
+  if (runCodexMcp(["add", "agent-mail", "--", bunPath(), CHANNEL_TS])) {
+    console.log("registered agent-mail with Codex");
+  }
+}
+
+function unregisterCodex(): void {
+  const registration = codexRegistration();
+  if (registration.status === "unavailable") return;
+  if (registration.status !== "present") return;
+  if (!codexRegistrationMatches(registration.value, bunPath(), CHANNEL_TS)) {
+    console.error(
+      "Codex agent-mail entry belongs to a different checkout; leaving it unchanged",
+    );
+    return;
+  }
+  if (runCodexMcp(["remove", "agent-mail"])) {
+    console.log("removed agent-mail from Codex MCP servers");
+  }
+}
+
+function readClaudeSettings(): Record<string, unknown> {
+  if (!existsSync(CLAUDE_SETTINGS)) return {};
+  const parsed = JSON.parse(readFileSync(CLAUDE_SETTINGS, "utf8")) as unknown;
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new TypeError(`${CLAUDE_SETTINGS} must contain a JSON object`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function installNativeAuditHook(): void {
+  const result = addNativeAuditHook(
+    readClaudeSettings(),
+    bunPath(),
+    NATIVE_AUDIT_TS,
+  );
+  if (!result.changed) {
+    console.log("Claude native SendMessage audit hook already installed");
+    return;
+  }
+  mkdirSync(dirname(CLAUDE_SETTINGS), { recursive: true });
+  writeFileSync(
+    CLAUDE_SETTINGS,
+    `${JSON.stringify(result.document, null, 2)}\n`,
+  );
+  console.log(`installed native SendMessage audit hook in ${CLAUDE_SETTINGS}`);
+}
+
+function uninstallNativeAuditHook(): void {
+  if (!existsSync(CLAUDE_SETTINGS)) return;
+  const result = removeNativeAuditHook(readClaudeSettings(), NATIVE_AUDIT_TS);
+  if (!result.changed) return;
+  writeFileSync(
+    CLAUDE_SETTINGS,
+    `${JSON.stringify(result.document, null, 2)}\n`,
+  );
+  console.log(`removed native SendMessage audit hook from ${CLAUDE_SETTINGS}`);
+}
+
+function cmdInstall(flags: Record<string, string | boolean>): void {
   ensureDirs();
   if (!existsSync(CONFIG_PATH)) {
     const configTemplate = [
@@ -712,7 +863,11 @@ function cmdInstall(): void {
   }
   launchctl("bootstrap", guiDomain(), PLIST_PATH);
   console.log("daemon bootstrapped via launchd (starts at boot)");
-  registerMcpServer();
+  registerMcpServer(flags["replace-claude"] === true);
+  if (flags["no-codex"] !== true) {
+    registerCodex(flags["replace-codex"] === true);
+  }
+  if (flags["native-audit"] === true) installNativeAuditHook();
   console.log(
     "\nTo receive push events, launch Claude Code with:\n" +
       "  claude --dangerously-load-development-channels server:agent-mail",
@@ -735,13 +890,22 @@ function cmdUninstall(): void {
       unknown
     >;
     const servers = doc.mcpServers as Record<string, unknown> | undefined;
-    if (servers && "agent-mail" in servers) {
+    if (
+      servers &&
+      claudeRegistrationMatches(servers["agent-mail"], bunPath(), CHANNEL_TS)
+    ) {
       const { "agent-mail": _removed, ...rest } = servers;
       doc.mcpServers = rest;
       writeFileSync(CLAUDE_JSON, JSON.stringify(doc, null, 2));
       console.log("removed agent-mail from mcpServers");
+    } else if (servers && "agent-mail" in servers) {
+      console.error(
+        "Claude agent-mail entry belongs to a different checkout; leaving it unchanged",
+      );
     }
   }
+  unregisterCodex();
+  uninstallNativeAuditHook();
 }
 
 function cmdDashboard(flags: Record<string, string | boolean>): void {
@@ -870,8 +1034,10 @@ Daemon (launchd-aware):
   logs [-f]                Show, or follow, the daemon log
 
 Setup:
-  install                  LaunchAgent (boot start) + ~/.claude.json entry
-  uninstall                Remove both
+  install [--native-audit] [--no-codex] [--replace-claude] [--replace-codex]
+                        Install daemon and Claude/Codex MCP entries; optionally
+                        audit native Claude SendMessage traffic
+  uninstall             Remove integrations owned by this checkout
 
 Config: ~/.config/agent-mail/config.toml  (port, Slack webhook/bot token)`;
 
@@ -947,7 +1113,7 @@ switch (cmd) {
     await cmdSlackDashboard(flags);
     break;
   case "install":
-    cmdInstall();
+    cmdInstall(flags);
     break;
   case "uninstall":
     cmdUninstall();

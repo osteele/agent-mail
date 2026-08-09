@@ -1,7 +1,7 @@
 {
   "name": "agent-mail",
   "version": "0.1.0",
-  "description": "Local mail bus for Claude Code agents: push messages into sessions via channels, with Slack echo",
+  "description": "Durable local messaging and coordination for Claude Code and Codex agents",
   "type": "module",
   "bin": {
     "agent-mail": "src/cli.ts"
