@@ -41,7 +41,13 @@ import {
   displayName,
   ensureDirs,
 } from "./paths.ts";
-import { type Registration, listLive, setMuted } from "./registry.ts";
+import {
+  type InboundPolicy,
+  type Registration,
+  listLive,
+  setInboundPolicy,
+  setMuted,
+} from "./registry.ts";
 import {
   activityTag,
   claudeSessions,
@@ -53,11 +59,25 @@ import {
   refreshSlackDashboard,
 } from "./slackDashboard.ts";
 import {
+  appendMessageGuarded,
   knownProjects,
   markAllMessagesRead,
   markMessagesRead,
   readMessages,
+  readReceipts,
 } from "./spool.ts";
+
+function capabilityTag(r: Registration): string {
+  const capabilities = r.capabilities;
+  if (!capabilities) return "";
+  const labels = [
+    capabilities.channelPush ? "channel" : "poll",
+    capabilities.nativePeerMessaging ? "native-peer" : undefined,
+    capabilities.claims ? "claims" : undefined,
+    capabilities.receipts ? "receipts" : undefined,
+  ].filter(Boolean);
+  return labels.length ? ` {${labels.join(",")}}` : "";
+}
 
 /** Best-effort human label for a registry entry: a deliberate `/rename` kept
  * verbatim, else `<aliased-base>-<readable-suffix>` (from cwd + session id),
@@ -222,7 +242,7 @@ async function cmdStatus(): Promise<void> {
   console.log(`listening sessions: ${live.length}`);
   for (const r of live)
     console.log(
-      `  ${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid}) [${sessionActivity(r, names)}]${r.muted ? " [muted]" : ""}`,
+      `  ${sessionLabel(r, names)}${capabilityTag(r)} — ${r.cwd} (pid ${r.pid}) [${sessionActivity(r, names)}] [inbound:${r.inboundPolicy ?? "accept"}]${r.muted ? " [muted]" : ""}`,
     );
 }
 
@@ -286,7 +306,7 @@ async function cmdNotify(
   const message = flags.message;
   if (typeof project !== "string" || typeof message !== "string") {
     console.error(
-      "usage: agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to <id>]",
+      "usage: agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to <id>] [--idempotency-key <key>] [--ttl <seconds>]",
     );
     process.exit(1);
   }
@@ -294,10 +314,31 @@ async function cmdNotify(
   const resolvedProject = resolveProjectArg(project);
   const replyTo =
     typeof flags["reply-to"] === "string" ? flags["reply-to"] : undefined;
+  const idempotencyKey =
+    typeof flags["idempotency-key"] === "string"
+      ? flags["idempotency-key"]
+      : undefined;
+  const ttlSeconds =
+    typeof flags.ttl === "string" ? Number(flags.ttl) : undefined;
+  if (
+    ttlSeconds !== undefined &&
+    (!Number.isFinite(ttlSeconds) || ttlSeconds < 0)
+  ) {
+    console.error("--ttl must be a non-negative number of seconds");
+    process.exit(1);
+  }
+  const from = typeof flags.from === "string" ? flags.from : "cli";
   const body = JSON.stringify({
     project: resolvedProject,
     message,
-    from: typeof flags.from === "string" ? flags.from : "cli",
+    from,
+    origin: {
+      kind: "automation",
+      transport: "cli",
+      authority: "untrusted",
+    },
+    ...(idempotencyKey ? { idempotencyKey } : {}),
+    ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
     ...(replyTo ? { replyTo } : {}),
   });
   try {
@@ -308,22 +349,52 @@ async function cmdNotify(
       signal: AbortSignal.timeout(3000),
     });
     if (resp.ok) {
-      console.log("sent via daemon");
+      const result = (await resp.json()) as { status?: string; id?: string };
+      console.log(
+        result.status === "duplicate"
+          ? `duplicate suppressed (${result.id})`
+          : `spooled ${result.id ?? "unknown"} via daemon`,
+      );
       return;
     }
     console.error(`daemon error: HTTP ${resp.status} ${await resp.text()}`);
     process.exit(1);
   } catch {
     // Daemon down: append directly so the message is not lost.
-    const { appendMessage } = await import("./spool.ts");
-    appendMessage({
-      ts: new Date().toISOString(),
-      from: typeof flags.from === "string" ? flags.from : "cli",
-      project: resolvedProject,
-      message,
-      ...(replyTo ? { replyTo } : {}),
-    });
-    console.log("daemon unreachable; spooled directly (no Slack echo)");
+    const result = appendMessageGuarded(
+      {
+        ts: new Date().toISOString(),
+        from,
+        project: resolvedProject,
+        message,
+        origin: {
+          kind: "automation",
+          transport: "cli",
+          authority: "untrusted",
+        },
+        ...(idempotencyKey ? { idempotencyKey } : {}),
+        ...(ttlSeconds !== undefined
+          ? {
+              expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
+            }
+          : {}),
+        ...(replyTo ? { replyTo } : {}),
+      },
+      {
+        duplicateWindowSeconds: config.duplicateWindowSeconds,
+        messageRateLimitPerMinute: config.messageRateLimitPerMinute,
+        defaultMessageTtlSeconds: config.defaultMessageTtlSeconds,
+      },
+    );
+    if (result.status === "rate_limited") {
+      console.error(`rate limited; retry in ${result.retryAfterSeconds}s`);
+      process.exit(1);
+    }
+    console.log(
+      result.status === "duplicate"
+        ? `duplicate suppressed (${result.id})`
+        : `daemon unreachable; spooled ${result.id} directly (no Slack echo)`,
+    );
   }
 }
 
@@ -369,6 +440,25 @@ function cmdMarkRead(flags: Record<string, string | boolean>): void {
   );
 }
 
+function cmdReceipts(flags: Record<string, string | boolean>): void {
+  const project =
+    typeof flags.project === "string"
+      ? resolveProjectArg(flags.project)
+      : canonicalProject(process.cwd());
+  const messageId = typeof flags.id === "string" ? flags.id : undefined;
+  const limit = typeof flags.limit === "string" ? Number(flags.limit) : 50;
+  const receipts = readReceipts(project, messageId).slice(-limit);
+  if (receipts.length === 0) {
+    console.log("no delivery receipts");
+    return;
+  }
+  for (const receipt of receipts) {
+    console.log(
+      `${receipt.messageId} ${receipt.status} [${receipt.ts}]${receipt.sessionId ? ` session=${receipt.sessionId}` : ""}${receipt.detail ? ` (${receipt.detail})` : ""}`,
+    );
+  }
+}
+
 function cmdListeners(): void {
   const live = listLive();
   if (live.length === 0) {
@@ -378,7 +468,7 @@ function cmdListeners(): void {
   const names = claudeSessions();
   for (const r of live) {
     console.log(
-      `${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid}, since ${r.started}) [${sessionActivity(r, names)}]${r.muted ? " [muted]" : ""}`,
+      `${sessionLabel(r, names)}${capabilityTag(r)} — ${r.cwd} (pid ${r.pid}, since ${r.started}) [${sessionActivity(r, names)}] [inbound:${r.inboundPolicy ?? "accept"}]${r.muted ? " [muted]" : ""}`,
     );
   }
 }
@@ -464,8 +554,9 @@ function cmdReleaseClaim(flags: Record<string, string | boolean>): void {
 
 /** Live sessions selected by --session (name or id) and/or --project. Requires
  * at least one selector so `mute` never silently targets every session. */
-function resolveMuteTargets(
+function resolveSessionTargets(
   flags: Record<string, string | boolean>,
+  usage: string,
 ): Registration[] {
   const session = typeof flags.session === "string" ? flags.session : undefined;
   const project =
@@ -473,9 +564,7 @@ function resolveMuteTargets(
       ? resolveProjectArg(flags.project)
       : undefined;
   if (!session && !project) {
-    console.error(
-      "usage: agent-mail mute|unmute (--session <name-or-id> | --project <dir>)",
-    );
+    console.error(usage);
     process.exit(1);
   }
   const names = claudeSessions();
@@ -495,7 +584,10 @@ function cmdSetMuted(
   flags: Record<string, string | boolean>,
   muted: boolean,
 ): void {
-  const targets = resolveMuteTargets(flags);
+  const targets = resolveSessionTargets(
+    flags,
+    "usage: agent-mail mute|unmute (--session <name-or-id> | --project <dir>)",
+  );
   const names = claudeSessions();
   if (targets.length === 0) {
     console.error("no matching live session");
@@ -511,6 +603,29 @@ function cmdSetMuted(
   for (const r of targets) {
     setMuted(r.cwd, r.pid, muted);
     console.log(`${verb} ${sessionLabel(r, names)} — ${r.cwd} (pid ${r.pid})`);
+  }
+}
+
+function cmdSetInboundPolicy(flags: Record<string, string | boolean>): void {
+  const policy = typeof flags.policy === "string" ? flags.policy : undefined;
+  if (policy !== "accept" && policy !== "hold" && policy !== "refuse") {
+    console.error(
+      "usage: agent-mail inbound --policy accept|hold|refuse (--session <name-or-id> | --project <dir>)",
+    );
+    process.exit(1);
+  }
+  const targets = resolveSessionTargets(
+    flags,
+    "usage: agent-mail inbound --policy accept|hold|refuse (--session <name-or-id> | --project <dir>)",
+  );
+  if (targets.length === 0) {
+    console.error("no matching live session");
+    process.exit(1);
+  }
+  const names = claudeSessions();
+  for (const target of targets) {
+    setInboundPolicy(target.cwd, target.pid, policy as InboundPolicy);
+    console.log(`${sessionLabel(target, names)} — inbound policy ${policy}`);
   }
 }
 
@@ -569,6 +684,11 @@ function cmdInstall(): void {
       '# slack_echo = "all"  # or "none"',
       "# Short aliases for long project bases in session labels (comma list):",
       '# session_aliases = "llm-performance-models=augur, dependency-routing=deproute"',
+      '# inbound_policy = "accept"  # accept, hold, or refuse',
+      "# duplicate_window_seconds = 10",
+      "# message_rate_limit_per_minute = 60",
+      "# default_message_ttl_seconds = 0  # 0 means no default expiry",
+      "# held_message_limit = 100",
       "# Editable Slack dashboard (agent-mail slack-dashboard) needs a bot token:",
       '# slack_bot_token = "xoxb-..."  # chat:write scope; invite the bot to the channel',
       '# slack_channel = "C0123ABCD"',
@@ -707,20 +827,25 @@ channel, then add to ${CONFIG_PATH}:
   }
 }
 
-const HELP = `agent-mail — local mail bus for Claude Code agents
+const HELP = `agent-mail — durable coordination for Claude Code and Codex agents
 
 Usage: agent-mail <command> [options]
 
 Messaging:
   notify --project <dir> --message <text> [--from <label>] [--reply-to <id>]
+         [--idempotency-key <key>] [--ttl <seconds>]
                         Send a message to a project's inbox
   inbox [--project <dir>] [--limit N] [--unread]
                         Read a project's spool (defaults to cwd)
   mark-read [--project <dir>] (--id <message-id> | --all)
                         Mark messages read
+  receipts [--project <dir>] [--id <message-id>] [--limit N]
+                        Show append-only delivery state changes
   listeners             List live sessions
   mute | unmute (--session <name-or-id> | --project <dir>)
                         Pause / resume channel push for matching sessions
+  inbound --policy accept|hold|refuse (--session <name-or-id> | --project <dir>)
+                        Set inbound treatment for matching sessions
 
 Coordination:
   claim-experiment [--project <dir>] [--notebook <dir>] [--owner <label>]
@@ -769,6 +894,9 @@ switch (cmd) {
   case "mark-read":
     cmdMarkRead(flags);
     break;
+  case "receipts":
+    cmdReceipts(flags);
+    break;
   case "listeners":
     cmdListeners();
     break;
@@ -777,6 +905,9 @@ switch (cmd) {
     break;
   case "unmute":
     cmdSetMuted(flags, false);
+    break;
+  case "inbound":
+    cmdSetInboundPolicy(flags);
     break;
   case "claim-experiment":
     cmdClaimExperiment(flags);

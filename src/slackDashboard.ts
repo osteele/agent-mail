@@ -60,7 +60,10 @@ function buildBlocks(state: DashboardState): object[] {
         .map(
           (p) =>
             `🟢 *${p.project}* — ${p.label}` +
+            `${p.client ? ` \`${p.client}\`` : ""}` +
+            `${p.capabilities.length ? ` \`${p.capabilities.join(",")}\`` : ""}` +
             `${p.activity ? ` _[${p.activity}]_` : ""}` +
+            ` _[inbound:${p.inboundPolicy}]_` +
             `${p.muted ? " 🔕" : ""}`,
         )
         .join("\n")

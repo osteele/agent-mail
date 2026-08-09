@@ -8,8 +8,21 @@ import {
   ensureDirs,
   legacyReadStatePath,
   readStatePath,
+  receiptPath,
   spoolPath,
 } from "./paths.ts";
+
+export type MessageOriginKind = "agent" | "automation" | "human";
+
+/** Provenance is descriptive and never conveys user authority. Receivers must
+ * apply their own permission rules to work requested by any message. */
+export interface MessageOrigin {
+  kind: MessageOriginKind;
+  transport: "mcp" | "cli" | "http" | "native-audit";
+  client?: string;
+  sessionId?: string;
+  authority: "untrusted";
+}
 
 export interface Message {
   id?: string;
@@ -19,6 +32,13 @@ export interface Message {
   message: string;
   replyTo?: string; // id of the message this is a reply to
   threadId?: string; // root message id; groups a back-and-forth conversation
+  /** Audit records appear in dashboards but are never delivered to an inbox. */
+  delivery?: "mail" | "audit";
+  origin?: MessageOrigin;
+  /** Caller-supplied retry key. A repeated key is accepted without re-appending. */
+  idempotencyKey?: string;
+  /** ISO timestamp after which channel delivery is skipped. */
+  expiresAt?: string;
   meta?: Record<string, string>;
 }
 
@@ -32,6 +52,111 @@ export interface ReadMessagesOptions {
   unreadOnly?: boolean;
 }
 
+export type ReceiptStatus =
+  | "spooled"
+  | "held"
+  | "pushed"
+  | "read"
+  | "refused"
+  | "expired";
+
+export interface DeliveryReceipt {
+  messageId: string;
+  project: string;
+  ts: string;
+  status: ReceiptStatus;
+  sessionId?: string;
+  detail?: string;
+}
+
+export interface AdmissionOptions {
+  duplicateWindowSeconds: number;
+  messageRateLimitPerMinute: number;
+  defaultMessageTtlSeconds: number | null;
+}
+
+export type AdmissionResult =
+  | { status: "spooled"; id: string; path: string }
+  | { status: "duplicate"; id: string }
+  | { status: "rate_limited"; retryAfterSeconds: number };
+
+function messageTime(msg: Message): number {
+  const time = Date.parse(msg.ts);
+  return Number.isFinite(time) ? time : 0;
+}
+
+function senderKey(msg: Message): string {
+  return msg.origin?.sessionId ?? msg.meta?.sessionId ?? msg.from;
+}
+
+function duplicateSignature(msg: Message): string {
+  return [
+    senderKey(msg),
+    msg.project,
+    msg.meta?.toSession ?? "*",
+    msg.delivery ?? "mail",
+    msg.message,
+  ].join("\u0000");
+}
+
+/** Decide whether a message should be appended. Exported for deterministic
+ * tests; the filesystem wrapper below applies it to recent spool entries. */
+export function admissionDecision(
+  recent: Message[],
+  incoming: Message,
+  options: AdmissionOptions,
+  nowMs = Date.now(),
+):
+  | { status: "accept" }
+  | { status: "duplicate"; id: string }
+  | { status: "rate_limited"; retryAfterSeconds: number } {
+  if (incoming.idempotencyKey) {
+    const prior = [...recent]
+      .reverse()
+      .find((msg) => msg.idempotencyKey === incoming.idempotencyKey);
+    if (prior?.id) return { status: "duplicate", id: prior.id };
+  }
+
+  if (options.duplicateWindowSeconds > 0) {
+    const duplicateCutoff = nowMs - options.duplicateWindowSeconds * 1000;
+    const signature = duplicateSignature(incoming);
+    const duplicate = [...recent]
+      .reverse()
+      .find(
+        (msg) =>
+          messageTime(msg) >= duplicateCutoff &&
+          duplicateSignature(msg) === signature,
+      );
+    if (duplicate?.id) return { status: "duplicate", id: duplicate.id };
+  }
+
+  const minuteCutoff = nowMs - 60_000;
+  const sender = senderKey(incoming);
+  const inWindow = recent.filter(
+    (msg) => senderKey(msg) === sender && messageTime(msg) >= minuteCutoff,
+  );
+  if (
+    options.messageRateLimitPerMinute > 0 &&
+    inWindow.length >= options.messageRateLimitPerMinute
+  ) {
+    const oldest = Math.min(...inWindow.map(messageTime));
+    return {
+      status: "rate_limited",
+      retryAfterSeconds: Math.max(
+        1,
+        Math.ceil((oldest + 60_000 - nowMs) / 1000),
+      ),
+    };
+  }
+  return { status: "accept" };
+}
+
+export function isExpired(msg: Message, nowMs = Date.now()): boolean {
+  if (!msg.expiresAt) return false;
+  const expiry = Date.parse(msg.expiresAt);
+  return Number.isFinite(expiry) && expiry <= nowMs;
+}
+
 /** Whether a message in a shared project spool is visible to one session.
  *
  * A project inbox is shared by every session in that directory. Session-local
@@ -41,6 +166,7 @@ export function messageVisibleToSession(
   msg: Message,
   sessionId: string,
 ): boolean {
+  if (msg.delivery === "audit" || isExpired(msg)) return false;
   if (msg.meta?.toSession && msg.meta.toSession !== sessionId) return false;
   return msg.meta?.sessionId !== sessionId || msg.meta?.toSession === sessionId;
 }
@@ -55,7 +181,100 @@ export function appendMessage(msg: Message): string {
   const threadId = msg.threadId ?? msg.replyTo ?? id;
   const withId = { ...msg, id, threadId };
   appendFileSync(path, `${JSON.stringify(withId)}\n`);
+  appendReceipt(msg.project, {
+    messageId: id,
+    project: msg.project,
+    ts: new Date().toISOString(),
+    status: "spooled",
+  });
   return path;
+}
+
+function recentMessages(project: string, limit = 1000): Message[] {
+  const path = spoolPath(project);
+  if (!existsSync(path)) return [];
+  const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
+  const out: Message[] = [];
+  for (const line of lines.slice(-limit)) {
+    try {
+      out.push(JSON.parse(line) as Message);
+    } catch {
+      // Admission remains available if one prior line was torn.
+    }
+  }
+  return out;
+}
+
+/** Best-effort idempotency and loop protection around the append-only spool.
+ * The daemon serializes normal calls; direct fallback appenders can still race,
+ * but O_APPEND keeps the log intact and downstream message ids remain unique. */
+export function appendMessageGuarded(
+  msg: Message,
+  options: AdmissionOptions,
+  nowMs = Date.now(),
+): AdmissionResult {
+  const id = msg.id ?? randomUUID();
+  const prepared: Message = {
+    ...msg,
+    id,
+    ...(msg.expiresAt || options.defaultMessageTtlSeconds === null
+      ? {}
+      : {
+          expiresAt: new Date(
+            nowMs + options.defaultMessageTtlSeconds * 1000,
+          ).toISOString(),
+        }),
+  };
+  const decision = admissionDecision(
+    recentMessages(msg.project),
+    prepared,
+    options,
+    nowMs,
+  );
+  if (decision.status !== "accept") return decision;
+  return { status: "spooled", id, path: appendMessage(prepared) };
+}
+
+export function appendReceipt(
+  project: string,
+  receipt: Omit<DeliveryReceipt, "project"> | DeliveryReceipt,
+): void {
+  ensureDirs();
+  const normalized: DeliveryReceipt = { ...receipt, project };
+  appendFileSync(receiptPath(project), `${JSON.stringify(normalized)}\n`);
+}
+
+export function readReceipts(
+  project: string,
+  messageId?: string,
+): DeliveryReceipt[] {
+  const path = receiptPath(project);
+  if (!existsSync(path)) return [];
+  const out: DeliveryReceipt[] = [];
+  for (const line of readFileSync(path, "utf8").split("\n")) {
+    if (!line) continue;
+    try {
+      const receipt = JSON.parse(line) as DeliveryReceipt;
+      if (!messageId || receipt.messageId === messageId) out.push(receipt);
+    } catch {
+      // A torn receipt does not hide later state transitions.
+    }
+  }
+  return out;
+}
+
+export function hasReceipt(
+  receipts: DeliveryReceipt[],
+  messageId: string,
+  sessionId: string,
+  statuses: ReceiptStatus[],
+): boolean {
+  return receipts.some(
+    (receipt) =>
+      receipt.messageId === messageId &&
+      receipt.sessionId === sessionId &&
+      statuses.includes(receipt.status),
+  );
 }
 
 /** Distinct project directories that have ever received mail. */
@@ -175,7 +394,11 @@ export function readAllMessages(): StoredMessage[] {
   return out;
 }
 
-export function markMessagesRead(project: string, ids: string[]): number {
+export function markMessagesRead(
+  project: string,
+  ids: string[],
+  sessionId?: string,
+): number {
   const available = new Set(
     readMessages(project, { limit: 0 }).map((msg) => msg.id),
   );
@@ -189,6 +412,17 @@ export function markMessagesRead(project: string, ids: string[]): number {
     toAdd.push(id);
   }
   appendReadIds(project, toAdd);
+  if (sessionId) {
+    const ts = new Date().toISOString();
+    for (const messageId of ids.filter((id) => available.has(id))) {
+      appendReceipt(project, {
+        messageId,
+        ts,
+        status: "read",
+        sessionId,
+      });
+    }
+  }
   return toAdd.length;
 }
 

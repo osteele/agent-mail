@@ -24,9 +24,22 @@ export interface Registration {
   // the live Claude name or a pronounceable alias off the session id
 
   client?: string; // host client from MCP clientInfo: "claude-code", "codex", ...
+  capabilities?: SessionCapabilities;
   muted?: boolean; // channel push paused; messages still spool and flush on unmute
+  inboundPolicy?: InboundPolicy;
   lastSeen?: string; // ISO 8601; stamped on each tool call the session makes
   started: string; // ISO 8601
+}
+
+export type InboundPolicy = "accept" | "hold" | "refuse";
+
+export interface SessionCapabilities {
+  tools: boolean;
+  inboxPoll: boolean;
+  channelPush: boolean;
+  claims: boolean;
+  receipts: boolean;
+  nativePeerMessaging: boolean;
 }
 
 export interface ProcessInfo {
@@ -81,6 +94,8 @@ export function register(
   sessionId?: string,
   name?: string,
   client?: string,
+  capabilities?: SessionCapabilities,
+  defaultInboundPolicy: InboundPolicy = "accept",
 ): string {
   ensureDirs();
   const path = entryPath(cwd, pid);
@@ -91,6 +106,7 @@ export function register(
   let muted: boolean | undefined;
   let lastSeen: string | undefined;
   let procStart: string | undefined;
+  let inboundPolicy = defaultInboundPolicy;
   if (existsSync(path)) {
     try {
       const prev = JSON.parse(readFileSync(path, "utf8")) as Registration;
@@ -98,6 +114,13 @@ export function register(
       if (typeof prev.muted === "boolean") muted = prev.muted;
       if (typeof prev.lastSeen === "string") lastSeen = prev.lastSeen;
       if (typeof prev.procStart === "string") procStart = prev.procStart;
+      if (
+        prev.inboundPolicy === "accept" ||
+        prev.inboundPolicy === "hold" ||
+        prev.inboundPolicy === "refuse"
+      ) {
+        inboundPolicy = prev.inboundPolicy;
+      }
     } catch {
       // corrupt prior entry; keep the fresh timestamp
     }
@@ -110,12 +133,46 @@ export function register(
     ...(sessionId ? { sessionId } : {}),
     ...(name ? { name } : {}),
     ...(client ? { client } : {}),
+    ...(capabilities ? { capabilities } : {}),
     ...(muted !== undefined ? { muted } : {}),
+    inboundPolicy,
     ...(lastSeen ? { lastSeen } : {}),
     started,
   };
   writeFileSync(path, JSON.stringify(entry, null, 1));
   return path;
+}
+
+/** Set how one session handles new deliveries. Held messages remain in the
+ * receipt log and are released when the policy returns to accept. */
+export function setInboundPolicy(
+  cwd: string,
+  pid: number,
+  policy: InboundPolicy,
+): boolean {
+  const path = entryPath(cwd, pid);
+  if (!existsSync(path)) return false;
+  let entry: Registration;
+  try {
+    entry = JSON.parse(readFileSync(path, "utf8")) as Registration;
+  } catch {
+    return false;
+  }
+  entry.inboundPolicy = policy;
+  writeFileSync(path, JSON.stringify(entry, null, 1));
+  return true;
+}
+
+export function inboundPolicy(cwd: string, pid: number): InboundPolicy {
+  const path = entryPath(cwd, pid);
+  if (!existsSync(path)) return "accept";
+  try {
+    const policy = (JSON.parse(readFileSync(path, "utf8")) as Registration)
+      .inboundPolicy;
+    return policy === "hold" || policy === "refuse" ? policy : "accept";
+  } catch {
+    return "accept";
+  }
 }
 
 /** Toggle a session's channel-push mute. Returns false if no entry exists (the

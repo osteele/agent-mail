@@ -27,14 +27,24 @@ import {
   sessionDisplayName,
 } from "./sessions.ts";
 import {
+  type AdmissionOptions,
   type Message,
-  appendMessage,
+  appendMessageGuarded,
   markAllMessagesRead,
   markMessagesRead,
   readMessages,
+  readReceipts,
 } from "./spool.ts";
 
 let config: Config = loadConfig();
+
+function admissionOptions(): AdmissionOptions {
+  return {
+    duplicateWindowSeconds: config.duplicateWindowSeconds,
+    messageRateLimitPerMinute: config.messageRateLimitPerMinute,
+    defaultMessageTtlSeconds: config.defaultMessageTtlSeconds,
+  };
+}
 
 function log(line: string): void {
   const stamped = `[${new Date().toISOString()}] ${line}\n`;
@@ -59,7 +69,10 @@ async function echoToSlack(msg: Message): Promise<void> {
   const sender = senderSid
     ? sessionDisplayName(senderSid, claudeSessions().get(senderSid), msg.from)
     : displayName(msg.from);
-  const recipient = displayName(msg.project);
+  const recipient =
+    msg.delivery === "audit" && msg.meta?.nativeRecipient
+      ? msg.meta.nativeRecipient
+      : displayName(msg.project);
   const listening = listLive().some(
     (r) => canonicalProject(r.cwd) === msg.project,
   );
@@ -141,8 +154,15 @@ const server = Bun.serve({
       );
     }
 
+    if (req.method === "GET" && url.pathname === "/receipts") {
+      const project = url.searchParams.get("project");
+      if (!project) return json({ error: "missing ?project=" }, 400);
+      const messageId = url.searchParams.get("message") ?? undefined;
+      return json(readReceipts(canonicalProject(project), messageId));
+    }
+
     if (req.method === "POST" && url.pathname === "/notify") {
-      let body: Partial<Message>;
+      let body: Partial<Message> & { ttlSeconds?: unknown };
       try {
         body = (await req.json()) as Partial<Message>;
       } catch {
@@ -151,22 +171,51 @@ const server = Bun.serve({
       if (!body.project || !body.message) {
         return json({ error: "required fields: project, message" }, 400);
       }
+      if (Buffer.byteLength(body.message, "utf8") > 65_536) {
+        return json({ error: "message exceeds 64 KiB" }, 413);
+      }
+      const now = Date.now();
+      const ttlSeconds =
+        typeof body.ttlSeconds === "number" && body.ttlSeconds >= 0
+          ? body.ttlSeconds
+          : undefined;
       const msg: Message = {
-        ts: new Date().toISOString(),
+        ts: new Date(now).toISOString(),
         from: body.from ?? "unknown",
         project: canonicalProject(body.project),
         message: body.message,
+        delivery: body.delivery === "audit" ? "audit" : "mail",
+        origin: {
+          kind: body.origin?.kind ?? "automation",
+          transport: body.origin?.transport ?? "http",
+          ...(body.origin?.client ? { client: body.origin.client } : {}),
+          ...(body.origin?.sessionId
+            ? { sessionId: body.origin.sessionId }
+            : {}),
+          // Local callers may describe provenance, but cannot grant authority.
+          authority: "untrusted",
+        },
+        ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
+        ...(ttlSeconds !== undefined
+          ? { expiresAt: new Date(now + ttlSeconds * 1000).toISOString() }
+          : body.expiresAt
+            ? { expiresAt: body.expiresAt }
+            : {}),
         ...(body.replyTo ? { replyTo: body.replyTo } : {}),
         ...(body.threadId ? { threadId: body.threadId } : {}),
         ...(body.meta ? { meta: body.meta } : {}),
       };
-      const path = appendMessage(msg);
+      const result = appendMessageGuarded(msg, admissionOptions(), now);
+      if (result.status === "rate_limited") {
+        return json(result, 429);
+      }
+      if (result.status === "duplicate") return json(result);
       log(`notify from=${msg.from} project=${msg.project}`);
       // Fire-and-forget: the spool append is the durable commitment; a slow
       // Slack POST must not delay the response (a timed-out client would
       // fall back to a direct spool append and double-deliver).
       echoToSlack(msg).catch((err) => log(`slack echo error: ${err}`));
-      return json({ ok: true, spool: path });
+      return json({ ok: true, ...result });
     }
 
     if (req.method === "POST" && url.pathname === "/read") {

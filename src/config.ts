@@ -18,6 +18,16 @@ export interface Config {
   slackBotToken: string | null;
   /** Channel id the Slack dashboard posts/updates in (e.g. C0123ABCD). */
   slackChannel: string | null;
+  /** Default per-session treatment of incoming agent-mail messages. */
+  inboundPolicy: "accept" | "hold" | "refuse";
+  /** Duplicate body suppression window. */
+  duplicateWindowSeconds: number;
+  /** Maximum accepted messages per sender in a rolling minute. */
+  messageRateLimitPerMinute: number;
+  /** Default expiry for messages without an explicit TTL; null means none. */
+  defaultMessageTtlSeconds: number | null;
+  /** Maximum held messages for one session before the oldest is refused. */
+  heldMessageLimit: number;
 }
 
 /** Parse a flat TOML subset: `key = "string"` / `key = 123` lines, # comments. */
@@ -70,5 +80,45 @@ export function loadConfig(): Config {
     process.env.AGENT_MAIL_SLACK_BOT_TOKEN ?? raw.slack_bot_token ?? null;
   const slackChannel =
     process.env.AGENT_MAIL_SLACK_CHANNEL ?? raw.slack_channel ?? null;
-  return { port, slackWebhook, slackEcho, slackBotToken, slackChannel };
+  const policy =
+    process.env.AGENT_MAIL_INBOUND_POLICY ?? raw.inbound_policy ?? "accept";
+  const inboundPolicy =
+    policy === "hold" || policy === "refuse" ? policy : "accept";
+  const duplicateWindowSeconds = positiveNumber(
+    process.env.AGENT_MAIL_DUPLICATE_WINDOW_SECONDS ??
+      raw.duplicate_window_seconds,
+    10,
+  );
+  const messageRateLimitPerMinute = positiveNumber(
+    process.env.AGENT_MAIL_RATE_LIMIT_PER_MINUTE ??
+      raw.message_rate_limit_per_minute,
+    60,
+  );
+  const ttlSpec =
+    process.env.AGENT_MAIL_DEFAULT_TTL_SECONDS ??
+    raw.default_message_ttl_seconds;
+  const defaultMessageTtlSeconds = ttlSpec
+    ? positiveNumber(ttlSpec, 0) || null
+    : null;
+  const heldMessageLimit = positiveNumber(
+    process.env.AGENT_MAIL_HELD_MESSAGE_LIMIT ?? raw.held_message_limit,
+    100,
+  );
+  return {
+    port,
+    slackWebhook,
+    slackEcho,
+    slackBotToken,
+    slackChannel,
+    inboundPolicy,
+    duplicateWindowSeconds,
+    messageRateLimitPerMinute,
+    defaultMessageTtlSeconds,
+    heldMessageLimit,
+  };
+}
+
+function positiveNumber(value: string | undefined, fallback: number): number {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : fallback;
 }

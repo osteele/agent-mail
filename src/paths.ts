@@ -3,6 +3,7 @@
  * State root: ~/.claude/agent-mail/
  *   inbox/<slug>.jsonl     per-project message spools (source of truth)
  *   read/<slug>.json        per-project read message ids
+ *   receipts/<slug>.jsonl  append-only delivery state changes
  *   registry/<id>.json     live channel-server registrations
  *   claims/<slug>/          experiment-number and path claims
  *   daemon.pid, daemon.log daemon state
@@ -17,6 +18,7 @@ import { join, resolve } from "node:path";
 export const STATE_DIR = join(homedir(), ".claude", "agent-mail");
 export const INBOX_DIR = join(STATE_DIR, "inbox");
 export const READ_DIR = join(STATE_DIR, "read");
+export const RECEIPTS_DIR = join(STATE_DIR, "receipts");
 export const REGISTRY_DIR = join(STATE_DIR, "registry");
 export const CLAIMS_DIR = join(STATE_DIR, "claims");
 export const CONFIG_DIR = join(homedir(), ".config", "agent-mail");
@@ -34,6 +36,7 @@ export function ensureDirs(): void {
     STATE_DIR,
     INBOX_DIR,
     READ_DIR,
+    RECEIPTS_DIR,
     REGISTRY_DIR,
     CLAIMS_DIR,
     CONFIG_DIR,
@@ -71,6 +74,10 @@ export function spoolPath(project: string): string {
  * concurrent markers union rather than clobber each other's marks. */
 export function readStatePath(project: string): string {
   return join(READ_DIR, `${projectSlug(project)}.read`);
+}
+
+export function receiptPath(project: string): string {
+  return join(RECEIPTS_DIR, `${projectSlug(project)}.jsonl`);
 }
 
 /** Pre-append-only read-state file (`{read:[...]}` JSON). Read for migration so

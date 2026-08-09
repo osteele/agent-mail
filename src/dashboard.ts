@@ -116,8 +116,10 @@ function render(s) {
     ? s.presence.map((p) =>
         '<div class="row"><span class="dot"></span><b>' + esc(p.project) + '</b>' +
         (p.client ? ' <span class="client">' + esc(p.client) + '</span>' : '') +
+        (p.capabilities.length ? ' <span class="client">' + esc(p.capabilities.join(',')) + '</span>' : '') +
         ' <span class="muted">' + esc(p.label) + '</span>' +
         (p.activity ? ' <span class="muted">[' + esc(p.activity) + ']</span>' : '') +
+        ' <span class="muted">[inbound:' + esc(p.inboundPolicy) + ']</span>' +
         (p.muted ? ' <span class="muted">🔕 muted</span>' : '') +
         '</div>').join("")
     : '<div class="empty">no sessions listening</div>';
