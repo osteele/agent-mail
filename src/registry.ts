@@ -9,7 +9,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { REGISTRY_DIR, ensureDirs, projectSlug } from "./paths.ts";
+import {
+  REGISTRY_DIR,
+  canonicalProject,
+  ensureDirs,
+  projectSlug,
+} from "./paths.ts";
 import { assignedGeneratedSessionName } from "./sessions.ts";
 
 export interface Registration {
@@ -67,20 +72,44 @@ export function parsePsLine(
   };
 }
 
-/** Batch-inspect processes: start time + command per pid; a pid absent from the
- * result is not running. `ps` exits nonzero when any listed pid is gone but
- * still reports the live ones, so ignore the exit status. */
+/** How many pids are worth querying one at a time before one whole-table scan
+ * is cheaper. 12 × ~4 ms ≈ the ~24 ms flat cost of `ps -ww -A`. */
+const PS_LOOP_MAX = 12;
+
+/** Inspect processes: start time + command per pid; a pid absent from the
+ * result is not running.
+ *
+ * Never issue a multi-row `-p` query. macOS `ps` takes a slow path the moment
+ * a `-p` query matches two or more processes — one matched row is ~4 ms, two
+ * are ~260 ms, and that cost is flat in the number of pids asked for and
+ * independent of the `-o` fields, while a whole-table `ps -A` is only ~24 ms
+ * (measured on Darwin 24.6). So loop single-pid queries for small sets and take
+ * one table scan for large ones. On Linux the batched form is fine and the loop
+ * costs a few ms per pid, so this stays unconditional rather than platform-gated.
+ *
+ * `-ww` is load-bearing, not cosmetic: without it `ps` truncates the command
+ * column, and `isCurrentProcess` falls back to matching that column for legacy
+ * entries with no recorded `procStart` — truncation would silently prune a live
+ * session.
+ *
+ * `ps` exits nonzero when a listed pid is gone but still reports the live ones,
+ * so the exit status is ignored. */
 function processInfo(pids: number[]): Map<number, ProcessInfo> {
   const map = new Map<number, ProcessInfo>();
-  if (pids.length === 0) return map;
-  const res = spawnSync(
-    "ps",
-    ["-p", pids.join(","), "-o", "pid=,lstart=,command="],
-    { encoding: "utf8" },
-  );
-  for (const line of (res.stdout ?? "").split("\n")) {
-    const parsed = parsePsLine(line);
-    if (parsed) map.set(parsed.pid, parsed.info);
+  const wanted = new Set(pids);
+  if (wanted.size === 0) return map;
+  const queries =
+    wanted.size <= PS_LOOP_MAX
+      ? [...wanted].map((pid) => ["-ww", "-p", String(pid)])
+      : [["-ww", "-A"]];
+  for (const query of queries) {
+    const res = spawnSync("ps", [...query, "-o", "pid=,lstart=,command="], {
+      encoding: "utf8",
+    });
+    for (const line of (res.stdout ?? "").split("\n")) {
+      const parsed = parsePsLine(line);
+      if (parsed && wanted.has(parsed.pid)) map.set(parsed.pid, parsed.info);
+    }
   }
   return map;
 }
@@ -268,32 +297,69 @@ function isCurrentProcess(
   return /agent-mail|channel\.ts/.test(info.command);
 }
 
-/** List live registrations, pruning entries whose process has exited or whose
- * pid has been recycled by an unrelated process. */
-export function listLive(): Registration[] {
+/** Read and parse registry files, pruning any that no longer parse. `keep`
+ * narrows the set before the process scan, which is the expensive step. */
+function readEntries(
+  keep?: (entry: Registration) => boolean,
+): { path: string; entry: Registration }[] {
   ensureDirs();
   const entries: { path: string; entry: Registration }[] = [];
   for (const name of readdirSync(REGISTRY_DIR)) {
     if (!name.endsWith(".json")) continue;
     const path = join(REGISTRY_DIR, name);
+    let entry: Registration;
     try {
-      entries.push({
-        path,
-        entry: JSON.parse(readFileSync(path, "utf8")) as Registration,
-      });
+      entry = JSON.parse(readFileSync(path, "utf8")) as Registration;
     } catch {
       rmSync(path);
+      continue;
     }
+    if (!keep || keep(entry)) entries.push({ path, entry });
   }
+  return entries;
+}
+
+/** Keep the entries whose process is still the one that registered; prune the
+ * rest. `bankLegacyNames` is upgrade bookkeeping and belongs only to the global
+ * sweep — a scoped read stays a pure read. */
+function verifyLive(
+  entries: { path: string; entry: Registration }[],
+  bankLegacyNames: boolean,
+): Registration[] {
   const procs = processInfo(entries.map((e) => e.entry.pid));
   const out: Registration[] = [];
   for (const { path, entry } of entries) {
     if (isCurrentProcess(entry, procs.get(entry.pid))) {
-      if (entry.sessionId) assignedGeneratedSessionName(entry.sessionId, true);
+      if (bankLegacyNames && entry.sessionId)
+        assignedGeneratedSessionName(entry.sessionId, true);
       out.push(entry);
     } else {
       rmSync(path);
     }
   }
   return out;
+}
+
+/** List live registrations, pruning entries whose process has exited or whose
+ * pid has been recycled by an unrelated process. */
+export function listLive(): Registration[] {
+  return verifyLive(readEntries(), true);
+}
+
+/** Live registrations for one project. Same pruning semantics as `listLive`,
+ * but only this project's entries are inspected — the difference between
+ * scanning every registered process and scanning the handful that share a
+ * directory, which matters to callers on a latency budget.
+ *
+ * Canonicalize at read time rather than trusting the stored `cwd`: entries
+ * written before a directory move still carry the old spelling (this repo has
+ * live entries under both `code/utils/agent-mail` and
+ * `code/agent-tools/agent-mail`, one a symlink to the other), and comparing raw
+ * strings silently splits one project in two. */
+export function listLiveInProject(project: string): Registration[] {
+  const canon = canonicalProject(project);
+  return verifyLive(
+    readEntries((entry) => canonicalProject(entry.cwd) === canon),
+    false,
+  );
 }
