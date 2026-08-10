@@ -39,6 +39,8 @@ export interface Message {
   idempotencyKey?: string;
   /** ISO timestamp after which channel delivery is skipped. */
   expiresAt?: string;
+  /** Per-message Slack routing. Undefined preserves the configured default. */
+  slackEcho?: boolean;
   meta?: Record<string, string>;
 }
 
@@ -155,6 +157,11 @@ export function isExpired(msg: Message, nowMs = Date.now()): boolean {
   if (!msg.expiresAt) return false;
   const expiry = Date.parse(msg.expiresAt);
   return Number.isFinite(expiry) && expiry <= nowMs;
+}
+
+/** Whether this message participates in the normal Slack mirror. */
+export function shouldEchoMessageToSlack(msg: Message): boolean {
+  return msg.slackEcho !== false;
 }
 
 /** Whether a message in a shared project spool is visible to one session.

@@ -2,7 +2,7 @@
 /** agent-mail CLI.
  *
  * Messaging:
- *   agent-mail notify --project <dir> --message <text> [--from <label>]
+ *   agent-mail notify --project <dir> --message <text> [--from <label>] [--no-slack]
  *   agent-mail inbox [--project <dir>] [--limit N] [--unread]
  *   agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
  *   agent-mail listeners
@@ -323,7 +323,7 @@ async function cmdNotify(
   const message = flags.message;
   if (typeof project !== "string" || typeof message !== "string") {
     console.error(
-      "usage: agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to <id>] [--idempotency-key <key>] [--ttl <seconds>]",
+      "usage: agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to <id>] [--idempotency-key <key>] [--ttl <seconds>] [--no-slack]",
     );
     process.exit(1);
   }
@@ -345,6 +345,7 @@ async function cmdNotify(
     process.exit(1);
   }
   const from = typeof flags.from === "string" ? flags.from : "cli";
+  const suppressSlack = flags["no-slack"] === true;
   const body = JSON.stringify({
     project: resolvedProject,
     message,
@@ -357,6 +358,7 @@ async function cmdNotify(
     ...(idempotencyKey ? { idempotencyKey } : {}),
     ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
     ...(replyTo ? { replyTo } : {}),
+    ...(suppressSlack ? { slackEcho: false } : {}),
   });
   try {
     const resp = await fetch(`http://127.0.0.1:${config.port}/notify`, {
@@ -396,6 +398,7 @@ async function cmdNotify(
             }
           : {}),
         ...(replyTo ? { replyTo } : {}),
+        ...(suppressSlack ? { slackEcho: false } : {}),
       },
       {
         duplicateWindowSeconds: config.duplicateWindowSeconds,
@@ -997,7 +1000,7 @@ Usage: agent-mail <command> [options]
 
 Messaging:
   notify --project <dir> --message <text> [--from <label>] [--reply-to <id>]
-         [--idempotency-key <key>] [--ttl <seconds>]
+         [--idempotency-key <key>] [--ttl <seconds>] [--no-slack]
                         Send a message to a project's inbox
   inbox [--project <dir>] [--limit N] [--unread]
                         Read a project's spool (defaults to cwd)

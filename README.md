@@ -249,7 +249,7 @@ delivery.
 
 ```bash
 agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to <id>] \
-  [--idempotency-key <key>] [--ttl <seconds>]
+  [--idempotency-key <key>] [--ttl <seconds>] [--no-slack]
 agent-mail inbox [--project <dir>] [--limit N] [--unread]
 agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
 agent-mail receipts [--project <dir>] [--id <message-id>] [--limit N]
@@ -311,6 +311,9 @@ dashboards, and the per-message Slack echo. Also settable via
 
 Slack webhook resolution order: `AGENT_MAIL_SLACK_WEBHOOK` env var →
 `slack_webhook` in config.toml → `SLACK_WEBHOOK` in `~/.config/weft/config`.
+The `notify --no-slack` flag suppresses the mirror for that message only; the
+message is still appended to the project inbox. Other messages continue to use
+the configured `slack_echo` policy.
 
 The `slack-dashboard` command additionally needs a bot token and channel
 (`slack_bot_token` / `slack_channel`, or `AGENT_MAIL_SLACK_BOT_TOKEN` /
@@ -322,7 +325,7 @@ needs the webhook; the editable dashboard needs the token.
 
 | Endpoint | Description |
 |---|---|
-| `POST /notify` | `{project, message, from?, meta?, idempotencyKey?, ttlSeconds?}` → guarded spool + Slack echo |
+| `POST /notify` | `{project, message, from?, meta?, idempotencyKey?, ttlSeconds?, slackEcho?}` → guarded spool + optional Slack echo |
 | `POST /read` | `{project, ids}` or `{project, all:true}` → mark messages read |
 | `GET /health` | liveness + config summary |
 | `GET /registry` | live channel-server registrations |

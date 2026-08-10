@@ -34,6 +34,7 @@ import {
   markMessagesRead,
   readMessages,
   readReceipts,
+  shouldEchoMessageToSlack,
 } from "./spool.ts";
 
 let config: Config = loadConfig();
@@ -62,7 +63,12 @@ function slackDate(ts: string): string {
 }
 
 async function echoToSlack(msg: Message): Promise<void> {
-  if (config.slackEcho === "none" || !config.slackWebhook) return;
+  if (
+    config.slackEcho === "none" ||
+    !config.slackWebhook ||
+    !shouldEchoMessageToSlack(msg)
+  )
+    return;
   // A message from a session shows its humanized session label (which already
   // carries the project base); one from the CLI/weft shows its `from` label.
   const senderSid = msg.meta?.sessionId;
@@ -203,6 +209,7 @@ const server = Bun.serve({
             : {}),
         ...(body.replyTo ? { replyTo: body.replyTo } : {}),
         ...(body.threadId ? { threadId: body.threadId } : {}),
+        ...(body.slackEcho === false ? { slackEcho: false } : {}),
         ...(body.meta ? { meta: body.meta } : {}),
       };
       const result = appendMessageGuarded(msg, admissionOptions(), now);

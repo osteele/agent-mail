@@ -5,6 +5,7 @@ import {
   admissionDecision,
   isExpired,
   messageVisibleToSession,
+  shouldEchoMessageToSlack,
 } from "./spool.ts";
 
 const base: Message = {
@@ -131,4 +132,10 @@ test("audit and expired messages are not visible to a receiving session", () => 
   ).toBe(false);
   const expired = { ...base, expiresAt: "2026-07-22T00:00:09.000Z" };
   expect(isExpired(expired, now)).toBe(true);
+});
+
+test("Slack echo defaults on and can be suppressed per message", () => {
+  expect(shouldEchoMessageToSlack(base)).toBe(true);
+  expect(shouldEchoMessageToSlack({ ...base, slackEcho: true })).toBe(true);
+  expect(shouldEchoMessageToSlack({ ...base, slackEcho: false })).toBe(false);
 });
