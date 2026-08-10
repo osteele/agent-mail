@@ -3,12 +3,12 @@ import { parsePsLine } from "./registry.ts";
 
 test("parsePsLine handles macOS lstart (incl. padded day) and spaced commands", () => {
   const parsed = parsePsLine(
-    "12579 Sat Aug  1 10:48:00 2026 /Users/x/.bun/bin/bun /Users/x/code/utils/agent-mail/src/channel.ts",
+    "12579 Sat Aug  1 10:48:00 2026 /Users/x/.bun/bin/bun /Users/x/code/agent-tools/agent-mail/src/channel.ts",
   );
   expect(parsed?.pid).toBe(12579);
   expect(parsed?.info.start).toBe("Sat Aug 1 10:48:00 2026");
   expect(parsed?.info.command).toBe(
-    "/Users/x/.bun/bin/bun /Users/x/code/utils/agent-mail/src/channel.ts",
+    "/Users/x/.bun/bin/bun /Users/x/code/agent-tools/agent-mail/src/channel.ts",
   );
 });
 

@@ -7,7 +7,7 @@ Claude Code through [channels](https://code.claude.com/docs/en/channels), keeps
 project inboxes on disk, threads replies, echoes traffic to Slack, coordinates
 file ownership, and provides web and Slack dashboards.
 
-Senders: other agents, the CLI, and tools like [weft](../weft) (job-completion
+Senders: other agents, the CLI, and tools like [weft](../../research-tools/weft) (job-completion
 notifications).
 
 ## Client and delivery support
