@@ -16,6 +16,9 @@
  *   agent-mail dashboard [--port N] [--open] [--no-tui]
  *   agent-mail slack-dashboard [--watch <seconds>]
  *
+ * Status line:
+ *   agent-mail status-line [--project <dir>] [--session <id>] [--debug]
+ *
  * Daemon management (launchd-aware: uses launchctl when the LaunchAgent is
  * installed, bare pidfile mode otherwise):
  *   agent-mail start | stop | restart | graceful | status | logs [-f]
@@ -53,6 +56,7 @@ import {
   displayName,
   ensureDirs,
 } from "./paths.ts";
+import { liveInProject, statusLineName } from "./presence.ts";
 import {
   type InboundPolicy,
   type Registration,
@@ -508,6 +512,86 @@ function cmdListeners(): void {
     console.log(
       `${sessionLabel(r, names)}${capabilityTag(r)} — ${r.cwd} (pid ${r.pid}, since ${r.started}) [${sessionActivity(r, names)}] [inbound:${r.inboundPolicy ?? "accept"}]${r.muted ? " [muted]" : ""}`,
     );
+  }
+}
+
+// --- status line -------------------------------------------------------------
+
+/** The part of Claude Code's statusLine payload this command reads. */
+interface StatusLinePayload {
+  session_id?: string;
+  cwd?: string;
+  workspace?: { current_dir?: string; project_dir?: string };
+}
+
+/** Read the statusLine payload from stdin when there is one.
+ *
+ * The tty guard matters: Claude Code pipes the payload in, but someone running
+ * this by hand has an interactive stdin and would otherwise hang waiting for
+ * input that never comes. */
+async function readStatusLinePayload(): Promise<StatusLinePayload | undefined> {
+  if (process.stdin.isTTY) return undefined;
+  try {
+    const text = await Bun.stdin.text();
+    return text.trim() ? (JSON.parse(text) as StatusLinePayload) : undefined;
+  } catch {
+    // Not JSON, or nothing arrived. Fall through to the flags rather than
+    // failing — this command's job is to stay out of the way.
+    return undefined;
+  }
+}
+
+/** Print this session's display name when another live agent shares the
+ * project, and nothing at all when it is alone.
+ *
+ * Always exits 0, including on error. The consumer is a shell substitution
+ * inside a status-line script (`name=$(agent-mail status-line)`), where a
+ * non-zero exit is hazardous under `set -e` and any stray output corrupts the
+ * user's prompt. Empty output is already the signal for "nothing to show".
+ *
+ * Resolves the project with `canonicalProject` rather than `resolveProjectArg`:
+ * this addresses no mailbox, and `resolveProjectArg` both rejects unknown
+ * directories and runs a full process scan, neither of which belongs on a path
+ * that re-runs several times a second. */
+async function cmdStatusLine(
+  flags: Record<string, string | boolean>,
+): Promise<void> {
+  const debug = flags.debug === true;
+  try {
+    const payload = await readStatusLinePayload();
+    const project = canonicalProject(
+      typeof flags.project === "string"
+        ? flags.project
+        : (payload?.workspace?.project_dir ??
+            payload?.workspace?.current_dir ??
+            payload?.cwd ??
+            process.cwd()),
+    );
+    const sessionId =
+      typeof flags.session === "string"
+        ? flags.session
+        : (payload?.session_id ?? process.env.CLAUDE_CODE_SESSION_ID);
+    const sessions = liveInProject(project);
+    const names = claudeSessions();
+    const name = statusLineName(
+      sessions,
+      project,
+      sessionId,
+      names,
+      Date.now(),
+    );
+    if (debug) {
+      console.error(`project: ${project}`);
+      console.error(`session: ${sessionId ?? "(no session id)"}`);
+      for (const r of sessions) {
+        console.error(
+          `  ${r.sessionId ?? "-"} pid ${r.pid} [${sessionActivity(r, names)}]`,
+        );
+      }
+    }
+    if (name) console.log(name);
+  } catch (error) {
+    if (debug) console.error(`status-line failed: ${error}`);
   }
 }
 
@@ -1043,6 +1127,12 @@ Dashboards:
   slack-dashboard [--watch <seconds>]
                         Post / refresh the editable Slack dashboard
 
+Status line:
+  status-line [--project <dir>] [--session <id>] [--debug]
+                        Print this session's display name when another live
+                        session shares the project, nothing when alone. Reads
+                        Claude Code's statusLine JSON payload on stdin.
+
 Daemon (launchd-aware):
   start | stop | restart   Manage the daemon process
   graceful                 Reload config (SIGHUP) without a restart
@@ -1081,6 +1171,9 @@ switch (cmd) {
     break;
   case "listeners":
     cmdListeners();
+    break;
+  case "status-line":
+    await cmdStatusLine(flags);
     break;
   case "mute":
     cmdSetMuted(flags, true);

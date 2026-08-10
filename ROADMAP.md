@@ -71,7 +71,8 @@ presence data directly queryable and useful at send time:
   live in project X right now, and what are they doing" (name, status,
   idle/working, last-seen), with project and client filters. `list_sessions` is
   the seed, but `who` should be a concise presence view rather than a transport
-  capability dump.
+  capability dump. `presence.ts` already supplies the pieces: a project-scoped
+  live read (`liveInProject`) and a non-stale peer filter (`peersInProject`).
 - **Delivery hints at send time** — `send_mail` already notes "no session
   listening; spooled"; extend direct and broadcast results with a snapshot such
   as "delivered to nia (active)" or "2 attached: 1 busy, 1 idle 3h" so the

@@ -137,7 +137,9 @@ overnight stays attached with nobody home. So every surface (`list_sessions`,
 last two minutes), or `[idle <age>]`, flagged `stale?` after a day. Recency is
 the most recent of: Claude Code's own session-activity timestamp, the last
 agent-mail tool call the session made, and its registration time. Treat
-long-idle sessions as probably vacant rather than as active agents.
+long-idle sessions as probably vacant rather than as active agents. The same
+recency rule decides when the [status line](#claude-code-status-line) shows a
+session's name: a peer idle past a day no longer counts as company.
 
 Delivery tiers: channel-enabled sessions get push; running sessions without
 the flag can arm a Monitor on their spool file; everything else reads the
@@ -336,6 +338,7 @@ agent-mail inbox [--project <dir>] [--limit N] [--unread]
 agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
 agent-mail receipts [--project <dir>] [--id <message-id>] [--limit N]
 agent-mail listeners                  # attached sessions + idle times
+agent-mail status-line [--project <dir>] [--session <id>] [--debug]  # see below
 agent-mail mute|unmute (--session <name-or-id> | --project <dir>)  # pause/resume push
 agent-mail inbound --policy accept|hold|refuse \
   (--session <name-or-id> | --project <dir>)
@@ -365,6 +368,69 @@ works even when the daemon is down.
 and edits it in place on each run (`--watch <seconds>` to refresh on a timer).
 This needs a Slack **bot token** (the incoming webhook used for per-message
 echoes can't edit messages). See [Connecting to Slack](#connecting-to-slack).
+
+## Claude Code status line
+
+`agent-mail status-line` prints this session's display name — but only when
+another live, non-stale session shares the project. Working alone it prints
+nothing, because a name only earns its space when it disambiguates.
+
+It reads Claude Code's [statusLine](https://code.claude.com/docs/en/statusline)
+JSON payload on stdin, taking the session id and project directory from it. Add
+it to your status line script:
+
+```bash
+#!/bin/bash
+# Claude Code closes stdin when it is done, so `cat` returns. The tty check
+# keeps a manual invocation from blocking.
+input=""
+[ -t 0 ] || input=$(cat)
+
+cwd=$(printf '%s' "$input" | jq -r '.workspace.current_dir // .cwd // empty')
+
+# Forward the payload we already captured — stdin was consumed above.
+session=""
+if [ -n "$input" ] && command -v agent-mail >/dev/null 2>&1; then
+    session=$(printf '%s' "$input" | agent-mail status-line 2>/dev/null)
+    [ -n "$session" ] && session=" $session"
+fi
+
+printf '%s%s\n' "${cwd/#$HOME/\~}" "$session"
+```
+
+```
+~/code/agent-tools/agent-mail                  # alone
+~/code/agent-tools/agent-mail Quiet Lantern    # sharing with another agent
+```
+
+Then point `statusLine` at it in `~/.claude/settings.json`:
+
+```json
+{ "statusLine": { "type": "command", "command": "bash ~/.claude/statusline.sh" } }
+```
+
+Notes for anyone wiring this up:
+
+- **Guard on `command -v agent-mail`.** The script runs for every project on
+  the machine, including ones where agent-mail isn't installed.
+- **Redirect stderr.** Anything the command writes to stderr would otherwise
+  land in the prompt. `--debug` reports the resolved project, session id, and
+  each peer's recency tag there.
+- **Put it last.** The name appears and disappears as peers come and go;
+  trailing placement keeps the rest of the line from shifting sideways.
+- **Exit code is always 0**, including on error, so `$(...)` stays safe under
+  `set -e`. Empty output is the signal for "nothing to show".
+- Claude Code cancels a status line command when the next update arrives, and a
+  cancelled script drops the whole line — so the whole script has to stay well
+  inside the 300 ms debounce. `status-line` reads the daemon's presence snapshot
+  (see below) and costs ~40 ms, most of which is process startup; with the
+  daemon stopped it falls back to a project-scoped scan and costs ~50 ms.
+
+The daemon republishes `~/.claude/agent-mail/presence.json` every 10 s — the
+pid-verified live registry, so readers on a latency budget skip the process
+scan. It is a presentation cache with a 30 s TTL, never a routing input:
+`send_mail`, `list_sessions`, and both dashboards keep reading the registry
+directly. That tick is also what prunes registrations whose process has exited.
 
 ## Configuration
 

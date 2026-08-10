@@ -7,6 +7,7 @@
  *   registry/<id>.json     live channel-server registrations
  *   session-names/<id>.json persistent generated session names
  *   claims/<slug>/          experiment-number and path claims
+ *   presence.json          daemon snapshot of the live registry
  *   daemon.pid, daemon.log daemon state
  * Config:     ~/.config/agent-mail/config.toml
  */
@@ -29,6 +30,9 @@ export const PID_PATH = join(STATE_DIR, "daemon.pid");
 export const LOG_PATH = join(STATE_DIR, "daemon.log");
 /** Persisted {channel, ts} of the editable Slack dashboard message. */
 export const SLACK_DASHBOARD_PATH = join(STATE_DIR, "slack-dashboard.json");
+/** Periodic daemon snapshot of the pid-verified live registry, so readers on a
+ * latency budget can skip the process scan. */
+export const PRESENCE_SNAPSHOT_PATH = join(STATE_DIR, "presence.json");
 
 export const DEFAULT_PORT = 8377;
 export const LAUNCHD_LABEL = "com.osteele.agent-mail";

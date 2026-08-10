@@ -7,6 +7,7 @@ import {
   adjectiveNounSessionName,
   assignedGeneratedSessionName,
   formatAge,
+  isStaleSession,
   lastActivityMs,
   legacyGeneratedSessionName,
   resetSessionAliasCache,
@@ -152,4 +153,26 @@ test("activityTag: busy wins; recent is active; old idle is flagged stale", () =
   expect(activityTag("idle", now - 26 * 3600_000, now)).toBe(
     "idle 26h — stale?",
   );
+});
+
+test("isStaleSession agrees with the tag activityTag renders", () => {
+  // The gate asks the predicate directly instead of matching "stale?" against a
+  // rendered string; this pins the two to one threshold and one precedence rule.
+  const now = Date.parse("2026-08-10T12:00:00.000Z");
+  const ages = [
+    0,
+    60_000,
+    3600_000,
+    23 * 3600_000,
+    24 * 3600_000,
+    72 * 3600_000,
+  ];
+  for (const status of [undefined, "busy", "idle"]) {
+    for (const age of ages) {
+      const lastActive = now - age;
+      expect(isStaleSession(status, lastActive, now)).toBe(
+        activityTag(status, lastActive, now).endsWith("stale?"),
+      );
+    }
+  }
 });

@@ -14,6 +14,7 @@
 import { appendFileSync, writeFileSync } from "node:fs";
 import { type Config, loadConfig } from "./config.ts";
 import { LOG_PATH, PID_PATH, canonicalProject, ensureDirs } from "./paths.ts";
+import { writePresenceSnapshot } from "./presence.ts";
 import { listLive } from "./registry.ts";
 import { claudeSessions, resetSessionAliasCache } from "./sessions.ts";
 import { formatSlackEcho } from "./slackEcho.ts";
@@ -207,6 +208,39 @@ const server = Bun.serve({
 
 log(`daemon started pid=${process.pid} port=${config.port}`);
 
+/** Periodic liveness sweep.
+ *
+ * Two jobs. It publishes the snapshot that latency-bound readers (the status
+ * line) use instead of running their own process scan. And because `listLive()`
+ * prunes as a side effect, this is the only thing that removes dead
+ * registrations without a human happening to run `listeners` or open a
+ * dashboard.
+ *
+ * No SIGHUP coupling is needed because the snapshot stores raw registrations —
+ * nothing in it derives from config. If it ever starts carrying names or
+ * aliases, it must be invalidated in the SIGHUP handler too. */
+const PRESENCE_TICK_MS = 10_000;
+let lastLiveCount = -1;
+
+function tickPresence(): void {
+  try {
+    const snapshot = writePresenceSnapshot();
+    // Log only on change: this fires every 10s and daemon.log is long-lived.
+    if (snapshot.sessions.length !== lastLiveCount) {
+      lastLiveCount = snapshot.sessions.length;
+      log(`presence snapshot: ${lastLiveCount} live`);
+    }
+  } catch (error) {
+    // An interval callback that throws takes the daemon down with it.
+    log(`presence snapshot failed: ${error}`);
+  }
+}
+
+// Publish once synchronously so the first readers aren't left without a
+// snapshot for a whole tick.
+tickPresence();
+const presenceTimer = setInterval(tickPresence, PRESENCE_TICK_MS);
+
 process.on("SIGHUP", () => {
   config = loadConfig();
   resetSessionAliasCache();
@@ -218,6 +252,7 @@ process.on("SIGHUP", () => {
 for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.on(sig, () => {
     log(`${sig} received, stopping`);
+    clearInterval(presenceTimer);
     server.stop();
     process.exit(0);
   });

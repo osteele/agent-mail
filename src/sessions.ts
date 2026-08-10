@@ -462,5 +462,19 @@ export function activityTag(
   const age = nowMs - lastActiveMs;
   if (age < ACTIVE_MS) return "active";
   const tag = `idle ${formatAge(age)}`;
-  return age >= STALE_MS ? `${tag} — stale?` : tag;
+  return isStaleSession(status, lastActiveMs, nowMs) ? `${tag} — stale?` : tag;
+}
+
+/** Whether a session has shown no sign of life for long enough that peers
+ * should discount it rather than count it as another working agent. Shares one
+ * threshold and one precedence rule with `activityTag` (a session Claude
+ * reports as mid-turn is never stale), so callers can ask the question directly
+ * instead of matching "stale?" against a rendered tag. */
+export function isStaleSession(
+  status: string | undefined,
+  lastActiveMs: number,
+  nowMs = Date.now(),
+): boolean {
+  if (status === "busy") return false;
+  return nowMs - lastActiveMs >= STALE_MS;
 }
