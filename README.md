@@ -315,6 +315,13 @@ The `notify --no-slack` flag suppresses the mirror for that message only; the
 message is still appended to the project inbox. Other messages continue to use
 the configured `slack_echo` policy.
 
+Per-message Slack echoes show compact session routes. A direct message in one
+project renders like `llm-performance-models · hia → nia`; a project broadcast
+renders as `hia → all` followed by up to three currently attached session names
+and `+N`. That recipient list is a live snapshot, not a delivery boundary — the
+durable inbox remains available to sessions that attach later. Deliberate
+Claude `/rename` names are kept verbatim.
+
 The `slack-dashboard` command additionally needs a bot token and channel
 (`slack_bot_token` / `slack_channel`, or `AGENT_MAIL_SLACK_BOT_TOKEN` /
 `AGENT_MAIL_SLACK_CHANNEL`). Create a Slack app with the `chat:write` scope,

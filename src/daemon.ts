@@ -13,19 +13,10 @@
 
 import { appendFileSync, writeFileSync } from "node:fs";
 import { type Config, loadConfig } from "./config.ts";
-import {
-  LOG_PATH,
-  PID_PATH,
-  canonicalProject,
-  displayName,
-  ensureDirs,
-} from "./paths.ts";
+import { LOG_PATH, PID_PATH, canonicalProject, ensureDirs } from "./paths.ts";
 import { listLive } from "./registry.ts";
-import {
-  claudeSessions,
-  resetSessionAliasCache,
-  sessionDisplayName,
-} from "./sessions.ts";
+import { claudeSessions, resetSessionAliasCache } from "./sessions.ts";
+import { formatSlackEcho } from "./slackEcho.ts";
 import {
   type AdmissionOptions,
   type Message,
@@ -52,16 +43,6 @@ function log(line: string): void {
   appendFileSync(LOG_PATH, stamped);
 }
 
-/** Slack section text caps at 3000 chars; leave headroom for mrkdwn escaping. */
-const SLACK_BODY_LIMIT = 2900;
-
-function slackDate(ts: string): string {
-  const epoch = Math.floor(Date.parse(ts) / 1000);
-  if (!Number.isFinite(epoch)) return "";
-  const fallback = new Date(ts).toLocaleTimeString();
-  return ` · <!date^${epoch}^{time}|${fallback}>`;
-}
-
 async function echoToSlack(msg: Message): Promise<void> {
   if (
     config.slackEcho === "none" ||
@@ -69,38 +50,14 @@ async function echoToSlack(msg: Message): Promise<void> {
     !shouldEchoMessageToSlack(msg)
   )
     return;
-  // A message from a session shows its humanized session label (which already
-  // carries the project base); one from the CLI/weft shows its `from` label.
-  const senderSid = msg.meta?.sessionId;
-  const sender = senderSid
-    ? sessionDisplayName(senderSid, claudeSessions().get(senderSid), msg.from)
-    : displayName(msg.from);
-  const recipient =
-    msg.delivery === "audit" && msg.meta?.nativeRecipient
-      ? msg.meta.nativeRecipient
-      : displayName(msg.project);
-  const listening = listLive().some(
-    (r) => canonicalProject(r.cwd) === msg.project,
-  );
-  const body =
-    msg.message.length > SLACK_BODY_LIMIT
-      ? `${msg.message.slice(0, SLACK_BODY_LIMIT - 1)}…`
-      : msg.message;
-
-  const lines = [`:mailbox: *${sender}* → *${recipient}*${slackDate(msg.ts)}`];
-  // Incoming webhooks can't post into a Slack thread (that needs a bot token —
-  // see ROADMAP), so a reply renders its parent inline as quoted context.
-  if (msg.replyTo) {
-    const re = msg.meta?.replyToFrom
-      ? `*${msg.meta.replyToFrom}*: ${msg.meta.replyToPreview ?? ""}`
-      : `message ${msg.replyTo.slice(0, 8)}`;
-    lines.push(`↩︎ re ${re}`);
-  }
-  lines.push(body);
+  const formatted = formatSlackEcho(msg, listLive(), claudeSessions());
   const blocks: object[] = [
-    { type: "section", text: { type: "mrkdwn", text: lines.join("\n") } },
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: formatted.sectionText },
+    },
   ];
-  if (!listening) {
+  if (!formatted.listening) {
     blocks.push({
       type: "context",
       elements: [{ type: "mrkdwn", text: "_no session listening; spooled_" }],
@@ -112,7 +69,7 @@ async function echoToSlack(msg: Message): Promise<void> {
     headers: { "Content-Type": "application/json" },
     // `text` is the notification/preview fallback when blocks can't render.
     body: JSON.stringify({
-      text: `📬 ${sender} → ${recipient}: ${body}`,
+      text: formatted.fallbackText,
       blocks,
     }),
   });

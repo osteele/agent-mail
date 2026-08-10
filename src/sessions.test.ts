@@ -5,6 +5,7 @@ import {
   lastActivityMs,
   resetSessionAliasCache,
   sessionDisplayName,
+  sessionRouteName,
 } from "./sessions.ts";
 
 const SID = "1ed87600-aaaa-bbbb-cccc-000000000000";
@@ -69,6 +70,20 @@ test("distinct sessions in one project get distinct suffixes", () => {
   const a = sessionDisplayName("sid-aaaa", undefined, CWD);
   const b = sessionDisplayName("sid-bbbb", undefined, CWD);
   expect(a).not.toBe(b);
+});
+
+test("route names collapse generated labels but keep deliberate renames", () => {
+  const generated = sessionRouteName(
+    SID,
+    { name: "mental-spaces-b4", nameSource: "derived" },
+    CWD,
+  );
+  expect(sessionDisplayName(SID, undefined, CWD)).toBe(
+    `mental-spaces-${generated}`,
+  );
+  expect(
+    sessionRouteName(SID, { name: "fix-auth-flow", nameSource: "user" }, CWD),
+  ).toBe("fix-auth-flow");
 });
 
 // --- recency helpers ---------------------------------------------------------

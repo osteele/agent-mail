@@ -164,6 +164,19 @@ export function sessionDisplayName(
   return generatedSessionName(sessionId);
 }
 
+/** Compact label for a session inside a route whose project is shown
+ * separately. Deliberate names stay intact; generated names collapse to their
+ * readable suffix. */
+export function sessionRouteName(
+  sessionId: string,
+  meta?: { name?: string; nameSource?: string },
+  cwd?: string,
+): string {
+  const name = meta?.name?.trim();
+  if (name && !isDerivedName(name, meta?.nameSource, cwd)) return name;
+  return readableSuffix(sessionId);
+}
+
 // --- Session recency ---------------------------------------------------------
 //
 // "Attached" (channel server alive, will receive push) and "present" (the agent
