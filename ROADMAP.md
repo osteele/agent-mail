@@ -61,18 +61,22 @@ the Web API helper in `slackDashboard.ts`), so the remaining work is small:
 
 ## Presence
 
-The registry already tracks which sessions are live (`cwd`, `pid`, `sessionId`,
-`name`) and enriches them with Claude Code session status. Surface it as a
-first-class concept rather than only a `send_mail` side effect:
+The registry already tracks attached sessions, protects against recycled pids,
+and combines Claude Code activity with agent-mail `lastSeen` timestamps. The
+CLI, MCP session listing, dashboards, and Slack routes all use the same readable
+session names and busy/active/idle-age tags. The remaining work is to make that
+presence data directly queryable and useful at send time:
 
 - **`who` / presence query** — a CLI command and an MCP tool answering "who is
   live in project X right now, and what are they doing" (name, status,
-  idle/working, last-seen). `list_sessions` is the seed.
-- **Liveness in the registry entry** — last-heartbeat timestamp so stale entries
-  read as "away" before pid-prune removes them, instead of vanishing abruptly.
+  idle/working, last-seen), with project and client filters. `list_sessions` is
+  the seed, but `who` should be a concise presence view rather than a transport
+  capability dump.
 - **Delivery hints at send time** — `send_mail` already notes "no session
-  listening; spooled"; extend to "1 session live (working), 1 away" so the
-  sender knows whether to expect a fast reply.
+  listening; spooled"; extend direct and broadcast results with a snapshot such
+  as "delivered to nia (active)" or "2 attached: 1 busy, 1 idle 3h" so the
+  sender knows whether to expect a fast reply. Keep this explicitly advisory:
+  the spool, not the snapshot, defines delivery.
 
 ## Live handoff
 
@@ -103,7 +107,8 @@ Building on the same `dashboardData` aggregation:
 - **`agent-mail top`** — a pure-terminal live dashboard (presence + sparkline +
   scrolling flight log) for when a browser isn't wanted.
 - **Chord diagram / adjacency matrix** — replace the ranked route list with a
-  matrix heatmap (scales past ~12 projects) or a chord diagram.
+  matrix heatmap (scales past ~12 projects) or a chord diagram, with project and
+  session-level views.
 - **Sankey** — sender → recipient flow with width proportional to volume.
 - **Stream graph** — stacked traffic over time banded by source type
   (weft vs. agent↔agent vs. cli).
