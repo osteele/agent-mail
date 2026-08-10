@@ -3,6 +3,45 @@
 Planned and in-progress work. Shipped items are removed from this file (the
 git log is the record of what's done).
 
+## Storage evolution
+
+The filesystem store remains suitable at the current scale. Append-only JSONL
+spools are easy to inspect and repair, isolate failures by project, support
+file-tail delivery, and let every entry point operate when the daemon is down.
+Current limits include whole-log inbox and dashboard queries, admission checks
+that can race between direct writers, separate message and receipt appends, and
+registry updates that rewrite whole JSON documents.
+
+Do not replace the spools wholesale yet. Evolve the storage layer in stages:
+
+- **Storage interface:** isolate message, receipt, read-state, registry, and
+  claim operations from their on-disk representations.
+- **Filesystem hardening:** make registry updates atomic and safe against
+  concurrent field updates; add explicit retention or compaction before log
+  growth becomes a problem.
+- **Rebuildable SQLite index:** project the JSONL logs into a disposable SQL
+  read model keyed by file and byte offset. Use it for dashboards, threads,
+  receipts, history, and aggregate queries. JSONL remains authoritative, so the
+  index can be deleted and rebuilt without recovery work.
+- **Migration criteria:** consider making SQLite authoritative when agent-mail
+  needs exact transactional admission, efficient retention, session-specific
+  unread state, or handoff and lease state machines. Scan latency or background
+  query cost becoming noticeable is also a migration signal.
+
+If SQLite becomes authoritative, use Bun's built-in `bun:sqlite` with one local
+database, WAL mode, foreign keys, a busy timeout, short transactions, and
+versioned additive migrations. The daemon, CLI, channel servers, and dashboards
+must continue opening the store directly; SQLite must not turn the daemon into
+a required broker. Keep flexible message metadata as JSON while indexing fields
+used for routing and queries. Add export, backup, integrity-check, and legacy
+import commands, and retain the old files as a read-only rollback until the
+import is validated.
+
+Keep config, PID, and log files outside the database. Leave claims on their
+existing project-scoped filesystem transactions until leases or richer workflow
+state justify moving them. Decide whether read state belongs to a project or to
+each session before defining the SQL schema.
+
 ## Native Slack threading
 
 Threads exist in the mail layer (`replyTo`/`threadId` on every message), and the
