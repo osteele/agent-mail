@@ -117,7 +117,8 @@ function render(s) {
         '<div class="row"><span class="dot"></span><b>' + esc(p.project) + '</b>' +
         (p.client ? ' <span class="client">' + esc(p.client) + '</span>' : '') +
         (p.capabilities.length ? ' <span class="client">' + esc(p.capabilities.join(',')) + '</span>' : '') +
-        ' <span class="muted">' + esc(p.label) + '</span>' +
+        ' <span class="muted">' + esc(p.displayName) +
+        (p.fullName === p.displayName ? '' : ' (' + esc(p.fullName) + ')') + '</span>' +
         (p.activity ? ' <span class="muted">[' + esc(p.activity) + ']</span>' : '') +
         ' <span class="muted">[inbound:' + esc(p.inboundPolicy) + ']</span>' +
         (p.muted ? ' <span class="muted">🔕 muted</span>' : '') +

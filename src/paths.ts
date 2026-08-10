@@ -5,6 +5,7 @@
  *   read/<slug>.json        per-project read message ids
  *   receipts/<slug>.jsonl  append-only delivery state changes
  *   registry/<id>.json     live channel-server registrations
+ *   session-names/<id>.json persistent generated session names
  *   claims/<slug>/          experiment-number and path claims
  *   daemon.pid, daemon.log daemon state
  * Config:     ~/.config/agent-mail/config.toml
@@ -20,6 +21,7 @@ export const INBOX_DIR = join(STATE_DIR, "inbox");
 export const READ_DIR = join(STATE_DIR, "read");
 export const RECEIPTS_DIR = join(STATE_DIR, "receipts");
 export const REGISTRY_DIR = join(STATE_DIR, "registry");
+export const SESSION_NAMES_DIR = join(STATE_DIR, "session-names");
 export const CLAIMS_DIR = join(STATE_DIR, "claims");
 export const CONFIG_DIR = join(homedir(), ".config", "agent-mail");
 export const CONFIG_PATH = join(CONFIG_DIR, "config.toml");
@@ -38,6 +40,7 @@ export function ensureDirs(): void {
     READ_DIR,
     RECEIPTS_DIR,
     REGISTRY_DIR,
+    SESSION_NAMES_DIR,
     CLAIMS_DIR,
     CONFIG_DIR,
   ]) {

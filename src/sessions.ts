@@ -9,10 +9,17 @@
  */
 
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { loadSessionAliases } from "./config.ts";
+import { SESSION_NAMES_DIR } from "./paths.ts";
 
 const SESSIONS_DIR = join(
   process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"),
@@ -53,6 +60,154 @@ const ONSETS = [
 ];
 const VOWELS = ["a", "e", "i", "o", "u", "ai", "ia"];
 const CODAS = ["", "", "", "l", "m", "n", "r", "s"];
+
+const ADJECTIVES = [
+  "amber",
+  "brave",
+  "bright",
+  "calm",
+  "clear",
+  "clever",
+  "cool",
+  "coral",
+  "crisp",
+  "daring",
+  "deep",
+  "eager",
+  "fair",
+  "fast",
+  "gentle",
+  "golden",
+  "grand",
+  "green",
+  "happy",
+  "hidden",
+  "indigo",
+  "jolly",
+  "keen",
+  "kind",
+  "lively",
+  "lucid",
+  "lucky",
+  "merry",
+  "mighty",
+  "nimble",
+  "noble",
+  "patient",
+  "plain",
+  "proud",
+  "quick",
+  "quiet",
+  "rapid",
+  "ready",
+  "red",
+  "rising",
+  "royal",
+  "silver",
+  "small",
+  "soft",
+  "steady",
+  "still",
+  "sunny",
+  "swift",
+  "teal",
+  "tidy",
+  "true",
+  "vivid",
+  "warm",
+  "wise",
+  "witty",
+  "young",
+  "azure",
+  "bold",
+  "cosmic",
+  "fresh",
+  "glad",
+  "open",
+  "polished",
+  "sharp",
+] as const;
+
+const NOUNS = [
+  "badger",
+  "beacon",
+  "birch",
+  "brook",
+  "cedar",
+  "comet",
+  "crane",
+  "dawn",
+  "delta",
+  "ember",
+  "falcon",
+  "fern",
+  "finch",
+  "forest",
+  "fox",
+  "garden",
+  "grove",
+  "harbor",
+  "hawk",
+  "heron",
+  "island",
+  "jay",
+  "kingfisher",
+  "lake",
+  "lantern",
+  "lark",
+  "maple",
+  "meadow",
+  "moon",
+  "oak",
+  "ocean",
+  "orbit",
+  "otter",
+  "owl",
+  "pine",
+  "planet",
+  "quartz",
+  "rain",
+  "raven",
+  "reef",
+  "river",
+  "robin",
+  "sage",
+  "shore",
+  "sparrow",
+  "star",
+  "stone",
+  "summit",
+  "sun",
+  "swift",
+  "thistle",
+  "tiger",
+  "trail",
+  "vale",
+  "willow",
+  "wind",
+  "wren",
+  "acorn",
+  "bridge",
+  "cloud",
+  "field",
+  "glade",
+  "kestrel",
+  "wave",
+] as const;
+
+export interface GeneratedSessionName {
+  scheme: "legacy-syllable" | "adjective-noun";
+  slug: string;
+  displayName: string;
+}
+
+export interface SessionNames {
+  /** Stable address shown in global lists and accepted by --session. */
+  fullName: string;
+  /** Human-facing name used where the project is already evident. */
+  displayName: string;
+  generated: boolean;
+}
 
 function syllable(bytes: Buffer, offset: number): string {
   return (
@@ -101,18 +256,85 @@ export function claudeSessions(): Map<string, ClaudeSessionMeta> {
   return map;
 }
 
-/** Deterministic, pronounceable fallback used only when no project base can be
- * derived (no cwd and no name). The raw session id remains the durable address. */
-export function generatedSessionName(sessionId: string): string {
-  const bytes = createHash("sha256").update(sessionId).digest();
-  return `${syllable(bytes, 0)}${syllable(bytes, 3)}-${syllable(bytes, 6)}${syllable(bytes, 9)}`;
-}
-
 /** One short, pronounceable syllable off the session id — the readable stand-in
  * for Claude's `-7a`/`-43` hex suffix. Low entropy is fine: a handful of
  * sessions per project. */
 function readableSuffix(sessionId: string): string {
   return syllable(createHash("sha256").update(sessionId).digest(), 0);
+}
+
+export function legacyGeneratedSessionName(
+  sessionId: string,
+): GeneratedSessionName {
+  const slug = readableSuffix(sessionId);
+  return { scheme: "legacy-syllable", slug, displayName: slug };
+}
+
+export function adjectiveNounSessionName(
+  sessionId: string,
+): GeneratedSessionName {
+  const bytes = createHash("sha256").update(sessionId).digest();
+  const adjective = ADJECTIVES[bytes[0] % ADJECTIVES.length];
+  const noun = NOUNS[bytes[1] % NOUNS.length];
+  return {
+    scheme: "adjective-noun",
+    slug: `${adjective}-${noun}`,
+    displayName: `${adjective[0].toUpperCase()}${adjective.slice(1)} ${noun[0].toUpperCase()}${noun.slice(1)}`,
+  };
+}
+
+function assignmentPath(sessionId: string, directory: string): string {
+  const id = createHash("sha256").update(sessionId).digest("hex");
+  return join(directory, `${id}.json`);
+}
+
+function readGeneratedSessionName(
+  sessionId: string,
+  directory: string,
+): GeneratedSessionName | undefined {
+  const path = assignmentPath(sessionId, directory);
+  if (!existsSync(path)) return undefined;
+  const value = JSON.parse(readFileSync(path, "utf8")) as GeneratedSessionName;
+  if (
+    (value.scheme !== "legacy-syllable" && value.scheme !== "adjective-noun") ||
+    typeof value.slug !== "string" ||
+    typeof value.displayName !== "string"
+  ) {
+    throw new Error(`invalid session-name assignment: ${path}`);
+  }
+  return {
+    scheme: value.scheme,
+    slug: value.slug,
+    displayName: value.displayName,
+  };
+}
+
+/** Return the session's persisted generated name, selecting one only once.
+ * `legacy` is used by the upgrade migration for sessions that were already
+ * registered; all genuinely new session ids use adjective–noun names. */
+export function assignedGeneratedSessionName(
+  sessionId: string,
+  legacy = false,
+  directory = SESSION_NAMES_DIR,
+): GeneratedSessionName {
+  const existing = readGeneratedSessionName(sessionId, directory);
+  if (existing) return existing;
+  const selected = legacy
+    ? legacyGeneratedSessionName(sessionId)
+    : adjectiveNounSessionName(sessionId);
+  mkdirSync(directory, { recursive: true });
+  const path = assignmentPath(sessionId, directory);
+  try {
+    writeFileSync(path, JSON.stringify({ sessionId, ...selected }, null, 1), {
+      flag: "wx",
+    });
+    return selected;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const raced = readGeneratedSessionName(sessionId, directory);
+    if (!raced) throw error;
+    return raced;
+  }
 }
 
 /** Project base (directory basename) for a session's label, mapped through the
@@ -145,36 +367,51 @@ function isDerivedName(
   return base ? new RegExp(`^${base}-[0-9a-z]{2}$`).test(name) : false;
 }
 
-/** Humanized label for a session.
+/** Full and display names for a session.
  *
  * - A deliberate `/rename` (non-derived Claude name) is kept verbatim.
- * - Otherwise (Claude's auto `<base>-<hex>`, or no Claude name): a stable
- *   `<aliased-base>-<readable-suffix>` — the project stays recognizable, the
- *   suffix is pronounceable instead of hex.
- * - As a last resort (no cwd and no name) a fully generated alias is used. */
+ * - Otherwise the persisted generated name supplies a kebab-case slug for the
+ *   full name and a human-facing display name.
+ * - The full name includes the aliased project base when cwd is available. */
+export function sessionNames(
+  sessionId: string,
+  meta?: { name?: string; nameSource?: string },
+  cwd?: string,
+  generatedName?: GeneratedSessionName,
+): SessionNames {
+  const name = meta?.name?.trim();
+  if (name && !isDerivedName(name, meta?.nameSource, cwd)) {
+    return { fullName: name, displayName: name, generated: false };
+  }
+  const generated =
+    generatedName ?? assignedGeneratedSessionName(sessionId, false);
+  return {
+    fullName: cwd
+      ? `${projectBase(cwd, sessionAliases())}-${generated.slug}`
+      : generated.slug,
+    displayName: generated.displayName,
+    generated: true,
+  };
+}
+
+/** Stable address: `<project>-<adjective>-<noun>` for new generated names. */
+export function sessionFullName(
+  sessionId: string,
+  meta?: { name?: string; nameSource?: string },
+  cwd?: string,
+  generatedName?: GeneratedSessionName,
+): string {
+  return sessionNames(sessionId, meta, cwd, generatedName).fullName;
+}
+
+/** Human-facing name used in routes and other project-labelled contexts. */
 export function sessionDisplayName(
   sessionId: string,
   meta?: { name?: string; nameSource?: string },
   cwd?: string,
+  generatedName?: GeneratedSessionName,
 ): string {
-  const name = meta?.name?.trim();
-  if (name && !isDerivedName(name, meta?.nameSource, cwd)) return name;
-  if (cwd)
-    return `${projectBase(cwd, sessionAliases())}-${readableSuffix(sessionId)}`;
-  return generatedSessionName(sessionId);
-}
-
-/** Compact label for a session inside a route whose project is shown
- * separately. Deliberate names stay intact; generated names collapse to their
- * readable suffix. */
-export function sessionRouteName(
-  sessionId: string,
-  meta?: { name?: string; nameSource?: string },
-  cwd?: string,
-): string {
-  const name = meta?.name?.trim();
-  if (name && !isDerivedName(name, meta?.nameSource, cwd)) return name;
-  return readableSuffix(sessionId);
+  return sessionNames(sessionId, meta, cwd, generatedName).displayName;
 }
 
 // --- Session recency ---------------------------------------------------------

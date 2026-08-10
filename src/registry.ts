@@ -10,6 +10,7 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 import { REGISTRY_DIR, ensureDirs, projectSlug } from "./paths.ts";
+import { assignedGeneratedSessionName } from "./sessions.ts";
 
 export interface Registration {
   cwd: string;
@@ -88,6 +89,33 @@ function entryPath(cwd: string, pid: number): string {
   return join(REGISTRY_DIR, `${projectSlug(cwd)}-${pid}.json`);
 }
 
+/** Before assigning the new naming scheme, bank the syllable names of every
+ * session already in the registry. Assignments are per session id and survive
+ * unregister/restart; stale entries are included so an old session resumed
+ * after the upgrade keeps the name its user already saw. */
+function preserveRegisteredSessionNames(): void {
+  for (const file of readdirSync(REGISTRY_DIR)) {
+    if (!file.endsWith(".json")) continue;
+    let entry: Registration;
+    try {
+      entry = JSON.parse(
+        readFileSync(join(REGISTRY_DIR, file), "utf8"),
+      ) as Registration;
+    } catch (error) {
+      if (
+        error instanceof SyntaxError ||
+        (error as NodeJS.ErrnoException).code === "ENOENT"
+      ) {
+        // Corrupt registry entries are pruned by listLive; a concurrently
+        // removed entry needs no migration.
+        continue;
+      }
+      throw error;
+    }
+    if (entry.sessionId) assignedGeneratedSessionName(entry.sessionId, true);
+  }
+}
+
 export function register(
   cwd: string,
   pid: number,
@@ -98,6 +126,8 @@ export function register(
   defaultInboundPolicy: InboundPolicy = "accept",
 ): string {
   ensureDirs();
+  preserveRegisteredSessionNames();
+  if (sessionId) assignedGeneratedSessionName(sessionId);
   const path = entryPath(cwd, pid);
   // Preserve state set before this re-register: the original start time (the
   // post-initialize re-register adds the client once the handshake reveals it),
@@ -259,6 +289,7 @@ export function listLive(): Registration[] {
   const out: Registration[] = [];
   for (const { path, entry } of entries) {
     if (isCurrentProcess(entry, procs.get(entry.pid))) {
+      if (entry.sessionId) assignedGeneratedSessionName(entry.sessionId, true);
       out.push(entry);
     } else {
       rmSync(path);

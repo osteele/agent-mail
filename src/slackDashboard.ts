@@ -59,7 +59,8 @@ function buildBlocks(state: DashboardState): object[] {
     ? state.presence
         .map(
           (p) =>
-            `🟢 *${p.project}* — ${p.label}` +
+            `🟢 *${p.project}* — ${p.displayName}` +
+            `${p.fullName === p.displayName ? "" : ` \`${p.fullName}\``}` +
             `${p.client ? ` \`${p.client}\`` : ""}` +
             `${p.capabilities.length ? ` \`${p.capabilities.join(",")}\`` : ""}` +
             `${p.activity ? ` _[${p.activity}]_` : ""}` +

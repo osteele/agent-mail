@@ -1,6 +1,6 @@
 import { canonicalProject, displayName } from "./paths.ts";
 import type { Registration } from "./registry.ts";
-import { type ClaudeSessionMeta, sessionRouteName } from "./sessions.ts";
+import { type ClaudeSessionMeta, sessionDisplayName } from "./sessions.ts";
 import type { Message } from "./spool.ts";
 
 const SLACK_SECTION_LIMIT = 3000;
@@ -54,7 +54,7 @@ function liveRecipientNames(
         canonicalProject(registration.cwd) === canonicalProject(msg.project),
     )
     .map((registration) =>
-      sessionRouteName(
+      sessionDisplayName(
         registration.sessionId as string,
         sessions.get(registration.sessionId as string),
         registration.cwd,
@@ -83,7 +83,7 @@ function route(
   const sourceProject = displayName(msg.from);
   const targetProject = displayName(msg.project);
   const senderSession = senderSid
-    ? sessionRouteName(senderSid, sessions.get(senderSid), msg.from)
+    ? sessionDisplayName(senderSid, sessions.get(senderSid), msg.from)
     : undefined;
 
   if (msg.delivery === "audit" && msg.meta?.nativeRecipient) {
@@ -116,7 +116,7 @@ function route(
       )
     : liveNames.length > 0;
   const targetSession = directSid
-    ? sessionRouteName(directSid, sessions.get(directSid), msg.project)
+    ? sessionDisplayName(directSid, sessions.get(directSid), msg.project)
     : "all";
   const live = directSid ? { mrkdwn: "", plain: "" } : liveSummary(liveNames);
 

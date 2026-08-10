@@ -64,7 +64,7 @@ import {
   activityTag,
   claudeSessions,
   lastActivityMs,
-  sessionDisplayName,
+  sessionNames,
 } from "./sessions.ts";
 import {
   SlackDashboardUnconfigured,
@@ -91,16 +91,34 @@ function capabilityTag(r: Registration): string {
   return labels.length ? ` {${labels.join(",")}}` : "";
 }
 
-/** Best-effort human label for a registry entry: a deliberate `/rename` kept
- * verbatim, else `<aliased-base>-<readable-suffix>` (from cwd + session id),
- * else `<client>` for a session-less entry. The registry `name` snapshot is
- * deliberately not used — it may be stale or a legacy synthetic id. */
+/** Human-facing display name followed by the stable full-name address. */
 function sessionLabel(
   r: { sessionId?: string; client?: string; cwd: string },
   names = claudeSessions(),
 ): string {
   if (!r.sessionId) return r.client ?? "unnamed";
-  return sessionDisplayName(r.sessionId, names.get(r.sessionId), r.cwd);
+  const identity = sessionNames(r.sessionId, names.get(r.sessionId), r.cwd);
+  return identity.displayName === identity.fullName
+    ? identity.fullName
+    : `${identity.displayName} (${identity.fullName})`;
+}
+
+function matchesSessionName(
+  registration: Registration,
+  query: string,
+  names = claudeSessions(),
+): boolean {
+  if (registration.sessionId === query) return true;
+  if (!registration.sessionId) return false;
+  const identity = sessionNames(
+    registration.sessionId,
+    names.get(registration.sessionId),
+    registration.cwd,
+  );
+  return (
+    identity.fullName === query ||
+    identity.displayName.toLocaleLowerCase() === query.toLocaleLowerCase()
+  );
 }
 
 /** Recency tag ("busy" / "active" / "idle 26h — stale?") for a registry entry. */
@@ -590,12 +608,7 @@ function resolveSessionTargets(
   const names = claudeSessions();
   return listLive().filter((r) => {
     if (project && canonicalProject(r.cwd) !== project) return false;
-    if (
-      session &&
-      r.sessionId !== session &&
-      sessionLabel(r, names) !== session
-    )
-      return false;
+    if (session && !matchesSessionName(r, session, names)) return false;
     return true;
   });
 }

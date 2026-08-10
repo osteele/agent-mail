@@ -1,15 +1,23 @@
 import { beforeEach, expect, test } from "bun:test";
+import { mkdtempSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   activityTag,
+  adjectiveNounSessionName,
+  assignedGeneratedSessionName,
   formatAge,
   lastActivityMs,
+  legacyGeneratedSessionName,
   resetSessionAliasCache,
   sessionDisplayName,
-  sessionRouteName,
+  sessionFullName,
+  sessionNames,
 } from "./sessions.ts";
 
 const SID = "1ed87600-aaaa-bbbb-cccc-000000000000";
 const CWD = "/Users/x/code/mental-spaces";
+const LEGACY = legacyGeneratedSessionName(SID);
 
 beforeEach(() => {
   process.env.AGENT_MAIL_SESSION_ALIASES = "";
@@ -18,33 +26,34 @@ beforeEach(() => {
 
 test("a deliberate /rename is kept verbatim", () => {
   expect(
-    sessionDisplayName(SID, { name: "fix-auth-flow", nameSource: "user" }, CWD),
+    sessionFullName(SID, { name: "fix-auth-flow", nameSource: "user" }, CWD),
   ).toBe("fix-auth-flow");
 });
 
 test("a derived <base>-<hex> name becomes <base>-<readable-suffix>", () => {
-  const label = sessionDisplayName(
+  const label = sessionFullName(
     SID,
     { name: "mental-spaces-b4", nameSource: "derived" },
     CWD,
+    LEGACY,
   );
   expect(label).toMatch(/^mental-spaces-[a-z]+$/);
   expect(label).not.toBe("mental-spaces-b4"); // hex suffix replaced
 });
 
 test("no Claude name still yields <base>-<readable-suffix>", () => {
-  expect(sessionDisplayName(SID, undefined, CWD)).toMatch(
+  expect(sessionFullName(SID, undefined, CWD, LEGACY)).toMatch(
     /^mental-spaces-[a-z]+$/,
   );
 });
 
 test("absent nameSource: <base>-<2hex> shape is treated as derived", () => {
   // No nameSource, but the name matches Claude's auto pattern → transform.
-  expect(sessionDisplayName(SID, { name: "mental-spaces-b4" }, CWD)).not.toBe(
-    "mental-spaces-b4",
-  );
+  expect(
+    sessionFullName(SID, { name: "mental-spaces-b4" }, CWD, LEGACY),
+  ).not.toBe("mental-spaces-b4");
   // A name that does NOT match the auto pattern is kept as a rename.
-  expect(sessionDisplayName(SID, { name: "my-custom-name" }, CWD)).toBe(
+  expect(sessionFullName(SID, { name: "my-custom-name" }, CWD)).toBe(
     "my-custom-name",
   );
 });
@@ -52,38 +61,67 @@ test("absent nameSource: <base>-<2hex> shape is treated as derived", () => {
 test("explicit non-derived nameSource overrides the auto-pattern fallback", () => {
   // Even though "mental-spaces-b4" matches the pattern, a user source keeps it.
   expect(
-    sessionDisplayName(
-      SID,
-      { name: "mental-spaces-b4", nameSource: "user" },
-      CWD,
-    ),
+    sessionFullName(SID, { name: "mental-spaces-b4", nameSource: "user" }, CWD),
   ).toBe("mental-spaces-b4");
 });
 
 test("the project base is mapped through the alias table", () => {
   process.env.AGENT_MAIL_SESSION_ALIASES = "mental-spaces=ms";
   resetSessionAliasCache();
-  expect(sessionDisplayName(SID, undefined, CWD)).toMatch(/^ms-[a-z]+$/);
+  expect(sessionFullName(SID, undefined, CWD, LEGACY)).toMatch(/^ms-[a-z]+$/);
 });
 
 test("distinct sessions in one project get distinct suffixes", () => {
-  const a = sessionDisplayName("sid-aaaa", undefined, CWD);
-  const b = sessionDisplayName("sid-bbbb", undefined, CWD);
+  const a = sessionFullName(
+    "sid-aaaa",
+    undefined,
+    CWD,
+    legacyGeneratedSessionName("sid-aaaa"),
+  );
+  const b = sessionFullName(
+    "sid-bbbb",
+    undefined,
+    CWD,
+    legacyGeneratedSessionName("sid-bbbb"),
+  );
   expect(a).not.toBe(b);
 });
 
-test("route names collapse generated labels but keep deliberate renames", () => {
-  const generated = sessionRouteName(
+test("legacy display names keep the current compact label", () => {
+  const generated = sessionDisplayName(
     SID,
     { name: "mental-spaces-b4", nameSource: "derived" },
     CWD,
+    LEGACY,
   );
-  expect(sessionDisplayName(SID, undefined, CWD)).toBe(
+  expect(sessionFullName(SID, undefined, CWD, LEGACY)).toBe(
     `mental-spaces-${generated}`,
   );
   expect(
-    sessionRouteName(SID, { name: "fix-auth-flow", nameSource: "user" }, CWD),
+    sessionDisplayName(SID, { name: "fix-auth-flow", nameSource: "user" }, CWD),
   ).toBe("fix-auth-flow");
+});
+
+test("new sessions get adjective-noun full and display names", () => {
+  const generated = adjectiveNounSessionName(SID);
+  const names = sessionNames(SID, undefined, CWD, generated);
+  expect(names.fullName).toMatch(/^mental-spaces-[a-z]+-[a-z]+$/);
+  expect(names.displayName).toMatch(/^[A-Z][a-z]+ [A-Z][a-z]+$/);
+  expect(names.fullName.endsWith(generated.slug)).toBe(true);
+  expect(names.displayName).toBe(generated.displayName);
+});
+
+test("a persisted selection wins over a later requested scheme", () => {
+  const directory = mkdtempSync(join(tmpdir(), "agent-mail-names-"));
+  try {
+    const legacy = assignedGeneratedSessionName(SID, true, directory);
+    expect(assignedGeneratedSessionName(SID, false, directory)).toEqual(legacy);
+    const [file] = readdirSync(directory);
+    const stored = readFileSync(join(directory, file), "utf8");
+    expect(stored).toContain('"scheme": "legacy-syllable"');
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
 });
 
 // --- recency helpers ---------------------------------------------------------

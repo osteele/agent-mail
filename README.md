@@ -80,6 +80,9 @@ policy controls agent-mail messages. They are independent.
   process is gone *or* when its pid has been recycled by an unrelated process
   (the entry records the process start time at registration and compares it on
   every listing).
+- **Session names** (`~/.claude/agent-mail/session-names/`): persistent
+  generated-name assignments keyed by session id. They survive listener
+  restarts and keep an existing session's name stable across naming upgrades.
 - **Claims** (`~/.claude/agent-mail/claims/`): atomic, per-project reservations
   for lab-notebook experiment numbers and files/directories being edited. Like
   the spool and registry, claims work directly through the filesystem and do
@@ -92,14 +95,22 @@ policy controls agent-mail messages. They are independent.
 ### Addressing
 
 Mail is addressed to a **project directory**. Every session running in that
-directory shares one inbox, so by default `send_mail` reaches all of them. To
-reach one specific session, pass its name or id as `session` (discover targets
-with `list_sessions`); the others in that directory won't see it. A session is
-identified by `CLAUDE_CODE_SESSION_ID` and labelled `<project-base>-<suffix>`:
-the project directory basename (optionally shortened via `session_aliases`, see
-Configuration) plus a short pronounceable suffix derived from the session id, in
-place of Claude Code's `<project>-<hex>` auto-name. A deliberate `/rename` is
-shown verbatim instead.
+directory shares one inbox, so by default `send_mail` reaches all of them. Each
+generated session identity has two forms:
+
+- The **full name** is its stable address, for example
+  `augur-quiet-lantern`. It combines the project directory basename (optionally
+  shortened through `session_aliases`) with a generated adjective–noun slug.
+- The **display name** is the human-facing form used in compact routes, for
+  example `Quiet Lantern`.
+
+Pass a session's full name, display name, or `CLAUDE_CODE_SESSION_ID` as
+`session` to reach it specifically (discover targets with `list_sessions`). A
+display name is matched without regard to case and must be unambiguous in the
+target project. A deliberate Claude `/rename` is preserved verbatim as both
+forms. Existing sessions retain their previously assigned syllable names, such
+as full name `augur-hia` and display name `hia`; adjective–noun names are only
+assigned to new session ids.
 
 The project spool stores every message for that directory. Session-local views
 (`check_inbox`, `mark_read`, and channel push) filter it for the current
@@ -245,6 +256,77 @@ checkout. Restart existing Claude Code and Codex sessions after changing their
 integration. Codex provides tools and presence registration, but not push
 delivery.
 
+## Connecting to Slack
+
+An incoming webhook mirrors each message into a Slack channel. Create a Slack
+app, enable [Incoming
+Webhooks](https://docs.slack.dev/messaging/sending-messages-using-incoming-webhooks),
+and select **Add New Webhook to Workspace**. Choose the channel that should
+receive agent-mail traffic, then copy the generated webhook URL. Treat this URL
+as a secret.
+
+Add the URL to `~/.config/agent-mail/config.toml`:
+
+```toml
+slack_webhook = "https://hooks.slack.com/services/..."
+slack_echo = "all"
+```
+
+`AGENT_MAIL_SLACK_WEBHOOK` can supply the URL instead. agent-mail also falls
+back to `SLACK_WEBHOOK` in `~/.config/weft/config` when neither setting is
+present. Reload the daemon and send a test message:
+
+```bash
+agent-mail graceful
+agent-mail notify --project "$PWD" --from cli --message "Slack connection test"
+```
+
+The webhook is enough for per-message echoes. The editable Slack dashboard
+also uses the Web API. Add the [`chat:write`
+scope](https://docs.slack.dev/reference/scopes/chat.write/) to the Slack app,
+reinstall the app in the workspace, and invite its bot to the target channel.
+Copy the Bot User OAuth Token and the channel ID into the same config file:
+
+```toml
+slack_bot_token = "xoxb-..."
+slack_channel = "C0123ABCD"
+```
+
+Environment-variable equivalents are `AGENT_MAIL_SLACK_BOT_TOKEN` and
+`AGENT_MAIL_SLACK_CHANNEL`. Post or refresh the dashboard with:
+
+```bash
+agent-mail slack-dashboard
+```
+
+Example:
+
+```text
+Quiet Lantern (Claude, project: augur)
+          |
+          | send_mail to Silver Otter
+          | "Can you verify the latency table?"
+          v
+ +--------------------+        Slack #agent-mail
+ | agent-mail spool   |------> [12:14] augur: Quiet Lantern -> Silver Otter
+ +--------------------+        "Can you verify the latency table?"
+          |
+          | durable inbox
+          v
+Silver Otter (Codex, project: augur)
+          |
+          | check_inbox; reply_to=msg-104
+          | "Row 21 still uses milliseconds."
+          v
+ +--------------------+        Slack #agent-mail
+ | agent-mail spool   |------> [12:17] augur: Silver Otter -> Quiet Lantern
+ +--------------------+        "Row 21 still uses milliseconds."
+          |
+          | channel push
+          v
+Quiet Lantern receives the reply
+```
+
 ## CLI
 
 ```bash
@@ -282,7 +364,7 @@ works even when the daemon is down.
 `agent-mail slack-dashboard` posts the same summary as a single Slack message
 and edits it in place on each run (`--watch <seconds>` to refresh on a timer).
 This needs a Slack **bot token** (the incoming webhook used for per-message
-echoes can't edit messages) — see Configuration.
+echoes can't edit messages). See [Connecting to Slack](#connecting-to-slack).
 
 ## Configuration
 
@@ -303,30 +385,19 @@ port = 8377
 ```
 
 `session_aliases` is a comma list of `basename=alias` pairs that shorten the
-project base in session labels (e.g. `augur-lon` instead of
-`llm-performance-models-lon`) across `listeners`, `list_sessions`, both
-dashboards, and the per-message Slack echo. Also settable via
+project base in full names (e.g. `augur-quiet-lantern` instead of
+`llm-performance-models-quiet-lantern`) across `listeners`, `list_sessions`,
+and both dashboards. Display names such as `Quiet Lantern` omit the project
+base. Also settable via
 `AGENT_MAIL_SESSION_ALIASES`. Changes are picked up on daemon `graceful`
 (SIGHUP) and by each new CLI/dashboard invocation.
 
-Slack webhook resolution order: `AGENT_MAIL_SLACK_WEBHOOK` env var →
-`slack_webhook` in config.toml → `SLACK_WEBHOOK` in `~/.config/weft/config`.
-The `notify --no-slack` flag suppresses the mirror for that message only; the
-message is still appended to the project inbox. Other messages continue to use
-the configured `slack_echo` policy.
-
-Per-message Slack echoes show compact session routes. A direct message in one
-project renders like `llm-performance-models · hia → nia`; a project broadcast
-renders as `hia → all` followed by up to three currently attached session names
-and `+N`. That recipient list is a live snapshot, not a delivery boundary — the
-durable inbox remains available to sessions that attach later. Deliberate
-Claude `/rename` names are kept verbatim.
-
-The `slack-dashboard` command additionally needs a bot token and channel
-(`slack_bot_token` / `slack_channel`, or `AGENT_MAIL_SLACK_BOT_TOKEN` /
-`AGENT_MAIL_SLACK_CHANNEL`). Create a Slack app with the `chat:write` scope,
-install it, and invite the bot to the target channel. The per-message echo only
-needs the webhook; the editable dashboard needs the token.
+The `notify --no-slack` flag suppresses the mirror for that message only. The
+message is still appended to the project inbox, and other messages continue to
+use the configured `slack_echo` policy. Per-message echoes use display names in
+compact routes. A project broadcast shows up to three currently attached
+display names and `+N`; this list is a live snapshot rather than a delivery
+boundary. Deliberate Claude `/rename` names are kept verbatim.
 
 ## HTTP API (127.0.0.1 only)
 
