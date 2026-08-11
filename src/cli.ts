@@ -8,7 +8,7 @@
  *   agent-mail listeners
  *   agent-mail mute|unmute (--session <name-or-id> | --project <dir>)
  *   agent-mail claim-experiment [--project <dir>] [--notebook <dir>]
- *   agent-mail claim-path --path <path> [--directory] [--project <dir>]
+ *   agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>]
  *   agent-mail claims [--project <dir>]
  *   agent-mail release-claim --id <claim-id> [--project <dir>]
  *
@@ -38,7 +38,12 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { type Claim, type ClaimOwner, claims } from "./claims.ts";
+import {
+  type Claim,
+  type ClaimOwner,
+  claims,
+  pathClaimTargets,
+} from "./claims.ts";
 import { loadConfig } from "./config.ts";
 import { openBrowser, serveDashboard } from "./dashboard.ts";
 import {
@@ -168,6 +173,18 @@ function parseFlags(args: string[]): Record<string, string | boolean> {
     }
   }
   return out;
+}
+
+/** All string values of one repeatable flag, preserving command-line order. */
+function repeatedFlagValues(args: string[], name: string): string[] {
+  const flag = `--${name}`;
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] !== flag) continue;
+    const value = args[i + 1];
+    if (value !== undefined && !value.startsWith("--")) values.push(value);
+  }
+  return values;
 }
 
 // --- daemon process management ----------------------------------------------
@@ -619,7 +636,9 @@ function describeClaim(claim: Claim): string {
   const resource =
     claim.type === "experiment"
       ? `${claim.experimentId} (${claim.notebook})`
-      : `${claim.pathType} ${claim.path}`;
+      : pathClaimTargets(claim)
+          .map((target) => `${target.pathType} ${target.path}`)
+          .join(", ");
   return `${claim.id} ${resource} — ${claim.owner.label} [${claim.createdAt}]`;
 }
 
@@ -635,21 +654,28 @@ function cmdClaimExperiment(flags: Record<string, string | boolean>): void {
   console.log(`${claim.experimentId} ${claim.id}`);
 }
 
-function cmdClaimPath(flags: Record<string, string | boolean>): void {
-  if (typeof flags.path !== "string") {
+function cmdClaimPath(
+  flags: Record<string, string | boolean>,
+  args: string[],
+): void {
+  const paths = repeatedFlagValues(args, "path");
+  if (paths.length === 0) {
     console.error(
-      "usage: agent-mail claim-path --path <path> [--directory] [--project <dir>] [--owner <label>]",
+      "usage: agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>] [--owner <label>]",
     );
     process.exit(1);
   }
   const project = claimProject(flags);
-  const claim = claims.claimPath(
+  const pathType = flags.directory === true ? "directory" : "file";
+  const claim = claims.claimPaths(
     project,
-    resolve(project, flags.path),
-    flags.directory === true ? "directory" : "file",
+    paths.map((path) => ({ path: resolve(project, path), pathType })),
     cliOwner(flags),
   );
-  console.log(`${claim.id} ${claim.pathType} ${claim.path}`);
+  console.log(`${claim.id}`);
+  for (const target of pathClaimTargets(claim)) {
+    console.log(`  ${target.pathType} ${target.path}`);
+  }
 }
 
 function cmdClaims(flags: Record<string, string | boolean>): void {
@@ -1114,8 +1140,9 @@ Messaging:
 Coordination:
   claim-experiment [--project <dir>] [--notebook <dir>] [--owner <label>]
                         Atomically reserve the next EXP-NNN number
-  claim-path --path <path> [--directory] [--project <dir>] [--owner <label>]
-                        Claim a file or directory against overlapping edits
+  claim-path --path <path> [--path <path> ...] [--directory]
+             [--project <dir>] [--owner <label>]
+                        Atomically claim files or directories under one id
   claims [--project <dir>]
                         List active claims
   release-claim --id <claim-id> [--project <dir>]
@@ -1188,7 +1215,7 @@ switch (cmd) {
     cmdClaimExperiment(flags);
     break;
   case "claim-path":
-    cmdClaimPath(flags);
+    cmdClaimPath(flags, rest);
     break;
   case "claims":
     cmdClaims(flags);

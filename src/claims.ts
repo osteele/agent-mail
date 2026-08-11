@@ -30,7 +30,26 @@ interface ClaimBase {
   createdAt: string;
 }
 
+export interface PathClaimTarget {
+  path: string;
+  pathType: "file" | "directory";
+}
+
+/** Current path-claim shape. Every acquisition is a group, including the
+ * singular compatibility API, so one claim id releases the complete edit set.
+ * `path` and `pathType` are a conservative projection for already-running
+ * pre-group readers: a multi-path group looks like a project-wide directory
+ * claim to them, so they over-block rather than silently violate the group. */
 export interface PathClaim extends ClaimBase {
+  type: "path";
+  paths: PathClaimTarget[];
+  path: string;
+  pathType: "file" | "directory";
+}
+
+/** Records written before grouped claims were introduced remain live until
+ * their owner releases or disconnects. Keep reading and enforcing them. */
+export interface LegacyPathClaim extends ClaimBase {
   type: "path";
   path: string;
   pathType: "file" | "directory";
@@ -43,13 +62,26 @@ export interface ExperimentClaim extends ClaimBase {
   number: number;
 }
 
-export type Claim = PathClaim | ExperimentClaim;
+export type AnyPathClaim = PathClaim | LegacyPathClaim;
+export type Claim = AnyPathClaim | ExperimentClaim;
+
+export function pathClaimTargets(claim: AnyPathClaim): PathClaimTarget[] {
+  return "paths" in claim
+    ? claim.paths
+    : [{ path: claim.path, pathType: claim.pathType }];
+}
 
 export class ClaimConflictError extends Error {
-  constructor(public readonly claim: Claim) {
+  constructor(
+    public readonly claim: Claim,
+    public readonly conflictingPath?: string,
+  ) {
     const resource =
       claim.type === "path"
-        ? claim.path
+        ? (conflictingPath ??
+          pathClaimTargets(claim)
+            .map((target) => target.path)
+            .join(", "))
         : `${claim.experimentId} in ${claim.notebook}`;
     super(`${resource} is claimed by ${claim.owner.label} (${claim.id})`);
     this.name = "ClaimConflictError";
@@ -79,9 +111,9 @@ function isWithin(project: string, path: string): boolean {
 }
 
 function pathsConflict(
-  a: PathClaim,
+  a: PathClaimTarget,
   path: string,
-  pathType: PathClaim["pathType"],
+  pathType: PathClaimTarget["pathType"],
 ): boolean {
   if (a.path === path) return true;
   if (a.pathType === "directory" && isWithin(a.path, path)) return true;
@@ -182,34 +214,74 @@ export class ClaimStore {
   claimPath(
     project: string,
     target: string,
-    pathType: PathClaim["pathType"],
+    pathType: PathClaimTarget["pathType"],
     owner: ClaimOwner,
   ): PathClaim {
-    const canonical = canonicalProject(project);
-    const path = canonicalPath(target);
-    if (!isWithin(canonical, path)) {
-      throw new Error(
-        `claim target must be inside project ${canonical}: ${path}`,
-      );
+    return this.claimPaths(project, [{ path: target, pathType }], owner);
+  }
+
+  /** Atomically claim an edit set. Validation and conflict detection complete
+   * before the one grouped record is published, so failure leaves no partial
+   * claims behind. */
+  claimPaths(
+    project: string,
+    targets: PathClaimTarget[],
+    owner: ClaimOwner,
+  ): PathClaim {
+    if (targets.length === 0) {
+      throw new Error("at least one claim path is required");
     }
-    if (existsSync(path)) {
-      const actualType = statSync(path).isDirectory() ? "directory" : "file";
-      if (actualType !== pathType) {
-        throw new Error(`${path} is a ${actualType}, not a ${pathType}`);
+    const canonical = canonicalProject(project);
+    const canonicalTargets: PathClaimTarget[] = [];
+    const seen = new Map<string, PathClaimTarget["pathType"]>();
+    for (const target of targets) {
+      const path = canonicalPath(target.path);
+      if (!isWithin(canonical, path)) {
+        throw new Error(
+          `claim target must be inside project ${canonical}: ${path}`,
+        );
       }
+      if (existsSync(path)) {
+        const actualType = statSync(path).isDirectory() ? "directory" : "file";
+        if (actualType !== target.pathType) {
+          throw new Error(
+            `${path} is a ${actualType}, not a ${target.pathType}`,
+          );
+        }
+      }
+      const previousType = seen.get(path);
+      if (previousType && previousType !== target.pathType) {
+        throw new Error(
+          `${path} cannot be claimed as both a ${previousType} and a ${target.pathType}`,
+        );
+      }
+      if (previousType) continue;
+      seen.set(path, target.pathType);
+      canonicalTargets.push({ path, pathType: target.pathType });
     }
     return this.withLock(canonical, () => {
-      const conflict = this.list(canonical).find(
-        (claim): claim is PathClaim =>
-          claim.type === "path" && pathsConflict(claim, path, pathType),
-      );
-      if (conflict) throw new ClaimConflictError(conflict);
+      for (const claim of this.list(canonical)) {
+        if (claim.type !== "path") continue;
+        for (const existing of pathClaimTargets(claim)) {
+          const requested = canonicalTargets.find((target) =>
+            pathsConflict(existing, target.path, target.pathType),
+          );
+          if (requested) {
+            throw new ClaimConflictError(claim, existing.path);
+          }
+        }
+      }
       const claim: PathClaim = {
         id: randomUUID(),
         type: "path",
         project: canonical,
-        path,
-        pathType,
+        paths: canonicalTargets,
+        path:
+          canonicalTargets.length === 1 ? canonicalTargets[0].path : canonical,
+        pathType:
+          canonicalTargets.length === 1
+            ? canonicalTargets[0].pathType
+            : "directory",
         owner,
         createdAt: new Date().toISOString(),
       };

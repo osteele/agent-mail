@@ -9,7 +9,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { ClaimConflictError, type ClaimOwner, ClaimStore } from "./claims.ts";
+import {
+  ClaimConflictError,
+  type ClaimOwner,
+  ClaimStore,
+  pathClaimTargets,
+} from "./claims.ts";
 import { projectSlug } from "./paths.ts";
 
 const temporaryDirectories: string[] = [];
@@ -20,13 +25,19 @@ afterEach(() => {
   }
 });
 
-function fixture(): { project: string; notebook: string; store: ClaimStore } {
+function fixture(): {
+  project: string;
+  notebook: string;
+  claimRoot: string;
+  store: ClaimStore;
+} {
   const root = mkdtempSync(join(tmpdir(), "agent-mail-claims-"));
   temporaryDirectories.push(root);
   const project = join(root, "project");
   const notebook = join(project, "lab-notebook");
+  const claimRoot = join(root, "claims");
   mkdirSync(join(notebook, "experiments"), { recursive: true });
-  return { project, notebook, store: new ClaimStore(join(root, "claims")) };
+  return { project, notebook, claimRoot, store: new ClaimStore(claimRoot) };
 }
 
 const ownerA: ClaimOwner = { id: "agent-a", label: "agent A" };
@@ -66,7 +77,103 @@ test("directory claims conflict with ancestor and descendant path claims", () =>
     "file",
     ownerB,
   );
-  expect(sibling.path).toBe(join(realpathSync(project), "README.md"));
+  expect(pathClaimTargets(sibling)[0].path).toBe(
+    join(realpathSync(project), "README.md"),
+  );
+});
+
+test("a path batch is stored and released as one claim", () => {
+  const { project, store } = fixture();
+  const requested = ["Schedule.swift", "MarkdownParsers.swift", "main.swift"];
+  const claim = store.claimPaths(
+    project,
+    requested.map((name) => ({
+      path: join(project, name),
+      pathType: "file" as const,
+    })),
+    ownerA,
+  );
+
+  expect(store.list(project)).toEqual([claim]);
+  expect(pathClaimTargets(claim).map((target) => target.path)).toEqual(
+    requested.map((name) => join(realpathSync(project), name)),
+  );
+  // Already-running pre-group readers see the compatibility projection as a
+  // project-wide directory claim. It is deliberately broad but never unsafe.
+  expect(claim.path).toBe(realpathSync(project));
+  expect(claim.pathType).toBe("directory");
+  expect(store.release(project, claim.id, ownerA.id)).toEqual(claim);
+  expect(store.list(project)).toEqual([]);
+});
+
+test("a conflicting path batch creates no partial claims", () => {
+  const { project, store } = fixture();
+  const occupied = store.claimPath(
+    project,
+    join(project, "occupied.swift"),
+    "file",
+    ownerA,
+  );
+
+  expect(() =>
+    store.claimPaths(
+      project,
+      [
+        { path: join(project, "free.swift"), pathType: "file" },
+        { path: join(project, "occupied.swift"), pathType: "file" },
+      ],
+      ownerB,
+    ),
+  ).toThrow(ClaimConflictError);
+  expect(store.list(project)).toEqual([occupied]);
+});
+
+test("every member of a grouped claim participates in conflict detection", () => {
+  const { project, store } = fixture();
+  const grouped = store.claimPaths(
+    project,
+    [
+      { path: join(project, "one.swift"), pathType: "file" },
+      { path: join(project, "two.swift"), pathType: "file" },
+    ],
+    ownerA,
+  );
+
+  expect(() =>
+    store.claimPath(project, join(project, "two.swift"), "file", ownerB),
+  ).toThrow(ClaimConflictError);
+  expect(store.list(project)).toEqual([grouped]);
+});
+
+test("legacy singular path records still block grouped claims", () => {
+  const { project, claimRoot, store } = fixture();
+  const canonical = realpathSync(project);
+  const directory = join(claimRoot, projectSlug(canonical));
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(
+    join(directory, "legacy.json"),
+    JSON.stringify({
+      id: "legacy",
+      type: "path",
+      project: canonical,
+      path: join(canonical, "legacy.swift"),
+      pathType: "file",
+      owner: ownerA,
+      createdAt: "2026-08-10T00:00:00.000Z",
+    }),
+  );
+
+  expect(() =>
+    store.claimPaths(
+      project,
+      [
+        { path: join(project, "free.swift"), pathType: "file" },
+        { path: join(project, "legacy.swift"), pathType: "file" },
+      ],
+      ownerB,
+    ),
+  ).toThrow(ClaimConflictError);
+  expect(store.list(project).map((claim) => claim.id)).toEqual(["legacy"]);
 });
 
 test("only the owning session can release a claim when owner checking is requested", () => {

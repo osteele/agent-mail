@@ -201,19 +201,34 @@ both files already in `experiments/` and reservations held by other agents.
 Create the `EXP-NNN-*.md` file before releasing the claim; after release, the
 file is what keeps the number allocated.
 
-`claim_path` reserves one file or directory within the current project. A
-directory claim conflicts with every claim below it, and a path cannot be
-claimed beneath a directory another agent owns. Non-overlapping siblings can
-be claimed independently. `list_claims` shows owners and claim IDs;
-`release_claim` releases a claim owned by the current session. Claims held by
-an MCP session are released on a normal session shutdown. If a session crashes,
-inspect the claim and release it explicitly with the CLI.
+`claim_path` reserves one or more files or directories within the current
+project. Pass a multi-file edit set in one call so acquisition is atomic: if
+any path conflicts, none are claimed. The set has one claim ID and one
+`release_claim` releases the whole set:
+
+```json
+{
+  "paths": [
+    "Sources/RoundsCore/Schedule.swift",
+    "Sources/RoundsCore/MarkdownParsers.swift",
+    "Checks/RoundsCoreChecks/main.swift"
+  ]
+}
+```
+
+The singular `path` input remains available. A directory claim conflicts with
+every claim below it, and a path cannot be claimed beneath a directory another
+agent owns. Non-overlapping siblings can be claimed independently.
+`list_claims` shows owners and claim IDs; `release_claim` releases a claim
+owned by the current session. Claims held by an MCP session are released on a
+normal session shutdown. If a session crashes, inspect the claim and release
+it explicitly with the CLI.
 
 The equivalent CLI is useful for inspection and recovery:
 
 ```bash
 agent-mail claim-experiment [--project <dir>] [--notebook <dir>]
-agent-mail claim-path --path <path> [--directory] [--project <dir>]
+agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>]
 agent-mail claims [--project <dir>]
 agent-mail release-claim --id <claim-id> [--project <dir>]
 ```
@@ -343,7 +358,7 @@ agent-mail mute|unmute (--session <name-or-id> | --project <dir>)  # pause/resum
 agent-mail inbound --policy accept|hold|refuse \
   (--session <name-or-id> | --project <dir>)
 agent-mail claim-experiment [--project <dir>] [--notebook <dir>]
-agent-mail claim-path --path <path> [--directory] [--project <dir>]
+agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>]
 agent-mail claims [--project <dir>]
 agent-mail release-claim --id <claim-id> [--project <dir>]
 agent-mail dashboard [--port N] [--open] [--no-tui]   # web dashboard

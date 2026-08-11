@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -62,5 +62,64 @@ test("status-line prints nothing and exits 0 when the session is alone", async (
     expect(await new Response(child.stdout).text()).toBe("");
   } finally {
     rmSync(project, { recursive: true });
+  }
+});
+
+test("claim-path groups repeated path flags under one claim id", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-cli-claims-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  mkdirSync(home);
+  mkdirSync(project);
+  const cli = join(import.meta.dir, "cli.ts");
+  const env = { ...process.env, HOME: home };
+  try {
+    const claim = Bun.spawn(
+      [
+        process.execPath,
+        cli,
+        "claim-path",
+        "--project",
+        project,
+        "--path",
+        "one.swift",
+        "--path",
+        "two.swift",
+      ],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await claim.exited).toBe(0);
+    const output = await new Response(claim.stdout).text();
+    const claimId = output.split("\n")[0];
+    expect(claimId).toMatch(/^[0-9a-f-]+$/);
+    expect(output).toContain("file ");
+    expect(output).toContain("one.swift");
+    expect(output).toContain("two.swift");
+
+    const list = Bun.spawn(
+      [process.execPath, cli, "claims", "--project", project],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await list.exited).toBe(0);
+    const listed = await new Response(list.stdout).text();
+    expect(listed.trim().split("\n")).toHaveLength(1);
+    expect(listed).toContain("one.swift");
+    expect(listed).toContain("two.swift");
+
+    const release = Bun.spawn(
+      [
+        process.execPath,
+        cli,
+        "release-claim",
+        "--project",
+        project,
+        "--id",
+        claimId,
+      ],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await release.exited).toBe(0);
+  } finally {
+    rmSync(root, { recursive: true });
   }
 });
