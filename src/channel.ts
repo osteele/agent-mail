@@ -421,7 +421,9 @@ function describeClaim(claim: Claim): string {
 }
 
 async function deliver(msg: Message): Promise<string> {
-  // Prefer the daemon (gets the Slack echo); fall back to direct append.
+  // Prefer the daemon; fall back to direct append. Keep the tool result about
+  // durable delivery only: integration-side mirrors are not useful context for
+  // the sending agent and tend to get repeated in its user-facing report.
   try {
     const resp = await fetch(`http://127.0.0.1:${config.port}/notify`, {
       method: "POST",
@@ -433,7 +435,7 @@ async function deliver(msg: Message): Promise<string> {
       const result = (await resp.json()) as { status?: string; id?: string };
       return result.status === "duplicate"
         ? `duplicate suppressed (message ${result.id})`
-        : `spooled as ${result.id ?? "unknown"} via daemon (Slack echoed)`;
+        : `spooled as ${result.id ?? "unknown"}`;
     }
   } catch {
     // daemon down; fall through
@@ -445,7 +447,7 @@ async function deliver(msg: Message): Promise<string> {
   if (result.status === "duplicate") {
     return `duplicate suppressed (message ${result.id})`;
   }
-  return `daemon unreachable; spooled ${result.id} directly (no Slack echo)`;
+  return `spooled as ${result.id}`;
 }
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
