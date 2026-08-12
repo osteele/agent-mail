@@ -192,12 +192,27 @@ export class ClaimStore {
 
   list(project: string): Claim[] {
     const canonical = canonicalProject(project);
-    const dir = this.projectDir(canonical);
+    return this.readDirectory(this.projectDir(canonical));
+  }
+
+  private readDirectory(dir: string): Claim[] {
     if (!existsSync(dir)) return [];
     return readdirSync(dir)
       .filter((name) => name.endsWith(".json"))
       .map((name) => JSON.parse(readFileSync(join(dir, name), "utf8")) as Claim)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  listAll(): Claim[] {
+    if (!existsSync(this.root)) return [];
+    return readdirSync(this.root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.name.endsWith(".lock"))
+      .flatMap((entry) => this.readDirectory(join(this.root, entry.name)))
+      .sort(
+        (a, b) =>
+          a.project.localeCompare(b.project) ||
+          a.createdAt.localeCompare(b.createdAt),
+      );
   }
 
   private write(claim: Claim): void {
@@ -216,8 +231,14 @@ export class ClaimStore {
     target: string,
     pathType: PathClaimTarget["pathType"],
     owner: ClaimOwner,
+    options: { ownerIsLive?: (owner: ClaimOwner) => boolean } = {},
   ): PathClaim {
-    return this.claimPaths(project, [{ path: target, pathType }], owner);
+    return this.claimPaths(
+      project,
+      [{ path: target, pathType }],
+      owner,
+      options,
+    );
   }
 
   /** Atomically claim an edit set. Validation and conflict detection complete
@@ -227,6 +248,7 @@ export class ClaimStore {
     project: string,
     targets: PathClaimTarget[],
     owner: ClaimOwner,
+    options: { ownerIsLive?: (owner: ClaimOwner) => boolean } = {},
   ): PathClaim {
     if (targets.length === 0) {
       throw new Error("at least one claim path is required");
@@ -262,14 +284,24 @@ export class ClaimStore {
     return this.withLock(canonical, () => {
       for (const claim of this.list(canonical)) {
         if (claim.type !== "path") continue;
+        let conflictingPath: string | undefined;
         for (const existing of pathClaimTargets(claim)) {
           const requested = canonicalTargets.find((target) =>
             pathsConflict(existing, target.path, target.pathType),
           );
           if (requested) {
-            throw new ClaimConflictError(claim, existing.path);
+            conflictingPath = existing.path;
+            break;
           }
         }
+        if (!conflictingPath) continue;
+        if (!options.ownerIsLive || options.ownerIsLive(claim.owner)) {
+          throw new ClaimConflictError(claim, conflictingPath);
+        }
+        // A grouped claim is one ownership transaction. If its process is
+        // definitively dead, remove the whole stale edit set before publishing
+        // the replacement rather than leaving unrelated members orphaned.
+        unlinkSync(join(this.projectDir(canonical), `${claim.id}.json`));
       }
       const claim: PathClaim = {
         id: randomUUID(),
@@ -342,6 +374,25 @@ export class ClaimStore {
       if (ownerId && claim.owner.id !== ownerId) {
         throw new Error(
           `claim ${claimId} belongs to ${claim.owner.label}; only its owner can release it`,
+        );
+      }
+      unlinkSync(join(this.projectDir(canonical), `${claim.id}.json`));
+      return claim;
+    });
+  }
+
+  recover(
+    project: string,
+    claimId: string,
+    ownerIsLive: (owner: ClaimOwner) => boolean,
+  ): Claim {
+    const canonical = canonicalProject(project);
+    return this.withLock(canonical, () => {
+      const claim = this.list(canonical).find((item) => item.id === claimId);
+      if (!claim) throw new Error(`claim not found: ${claimId}`);
+      if (ownerIsLive(claim.owner)) {
+        throw new Error(
+          `claim ${claimId} belongs to ${claim.owner.label}; its owner is live or cannot be verified offline`,
         );
       }
       unlinkSync(join(this.projectDir(canonical), `${claim.id}.json`));

@@ -123,3 +123,63 @@ test("claim-path groups repeated path flags under one claim id", async () => {
     rmSync(root, { recursive: true });
   }
 });
+
+test("work CLI lists logical ownership across projects", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-cli-work-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  mkdirSync(home);
+  mkdirSync(project);
+  const cli = join(import.meta.dir, "cli.ts");
+  const env = { ...process.env, HOME: home };
+  try {
+    const acquire = Bun.spawn(
+      [
+        process.execPath,
+        cli,
+        "work",
+        "acquire",
+        "--project",
+        project,
+        "--type",
+        "research-plan",
+        "--key",
+        "2026-08-12-pilot",
+        "--owner",
+        "operator",
+      ],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await acquire.exited).toBe(0);
+    const acquired = await new Response(acquire.stdout).text();
+    const workId = acquired.split(" ")[0];
+    expect(workId).toMatch(/^[0-9a-f-]+$/);
+
+    const list = Bun.spawn([process.execPath, cli, "work", "list", "--all"], {
+      env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(await list.exited).toBe(0);
+    expect(await new Response(list.stdout).text()).toContain(
+      "research-plan:2026-08-12-pilot",
+    );
+
+    const release = Bun.spawn(
+      [
+        process.execPath,
+        cli,
+        "work",
+        "release",
+        "--project",
+        project,
+        "--id",
+        workId,
+      ],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await release.exited).toBe(0);
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});

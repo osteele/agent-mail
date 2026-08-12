@@ -23,6 +23,7 @@ bun install
 bun link
 agent-mail install
 agent-mail status
+agent-mail dashboard --open
 ```
 
 [`bun link`](https://bun.com/docs/pm/cli/link) adds the `agent-mail` command to
@@ -126,6 +127,9 @@ policy controls agent-mail messages. The policies are independent.
 - **Claims are filesystem transactions.** Per-project entries under
   `~/.claude/agent-mail/claims/` reserve lab-notebook experiment numbers and
   files or directories. Claims do not depend on the daemon.
+- **Work leases assign logical responsibility.** Per-project entries under
+  `~/.claude/agent-mail/work/` exclusively assign logical work without
+  restricting file edits. They also do not depend on the daemon.
 - **Dashboards read the files directly.** `src/dashboard.ts` and
   `src/slackDashboard.ts` use the shared aggregation in `src/dashboardData.ts`
   to render a local web page or an editable Slack message. They do not depend
@@ -160,8 +164,8 @@ session-targeted message is visible only to the addressed session. The CLI
 the stored messages without session-local filtering.
 
 Each session also records its **host client**, either `claude-code` or `codex`,
-and capabilities such as `channel`, `poll`, `native-peer`, `claims`, and
-`receipts`. The MCP handshake and environment supply these values. They appear
+and capabilities such as `channel`, `poll`, `native-peer`, `claims`, `work`,
+and `receipts`. The MCP handshake and environment supply these values. They appear
 in `status`, `listeners`, `list_sessions`, and both dashboards. Agents can use
 native peer messaging when the target advertises it. Otherwise, they can use
 channel push or durable polling. Codex sets no session environment variable,
@@ -266,8 +270,13 @@ every claim below it, and a path cannot be claimed beneath a directory another
 agent owns. Non-overlapping siblings can be claimed independently.
 `list_claims` shows owners and claim IDs; `release_claim` releases a claim
 owned by the current session. Claims held by an MCP session are released on a
-normal session shutdown. If a session crashes, inspect the claim and release
-it explicitly with the CLI.
+normal session shutdown. A new path acquisition automatically removes a
+conflicting claim only when agent-mail proves that its exact owner process is
+dead. It never displaces an idle, live, or manually registered owner.
+
+A missing claimed path is not by itself stale: agents may claim a file before
+creating it. If a session crashes, use `list_coordination` to inspect its owner,
+target, and condition. Check the intended edit before recovering the record.
 
 The equivalent CLI is useful for inspection and recovery:
 
@@ -276,6 +285,64 @@ agent-mail claim-experiment [--project <dir>] [--notebook <dir>]
 agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>]
 agent-mail claims [--project <dir>]
 agent-mail release-claim --id <claim-id> [--project <dir>]
+```
+
+### Logical work leases
+
+Work leases answer who is responsible for executing a logical unit of work.
+Path claims reserve edit sets. Agents can hold either form of coordination
+independently, so responsibility for execution does not restrict who may edit
+the source file.
+
+`acquire_work` atomically leases a `(resource_type, resource_key)` pair within
+the current canonical project. Repeating the acquisition from the same session
+is idempotent and updates its metadata. A live different owner causes a
+conflict; a definitively dead session can be displaced on the next acquisition.
+`update_work` records a concise `working` or `waiting` state and current
+activity. `release_work` relinquishes responsibility.
+
+`list_work` defaults to the current project. Pass `all_projects: true` for a
+cross-project view, or filter by resource type or owner. `list_sessions` also
+shows each session's leased work. MCP-session leases are released on normal
+shutdown; an offline owner remains visible for inspection and CLI recovery.
+
+Research plans use `resource_type: "research-plan"` and the plan filename stem
+as `resource_key`, so ownership survives moves among plan status directories.
+The current path is optional provenance, not identity.
+
+### Inspection and recovery
+
+`list_coordination` combines work leases, path claims, and experiment-number
+reservations in one project or cross-project view. Each record has a condition:
+
+- `healthy` — its session owner is live, or it has a manual owner.
+- `owner-offline` — the recorded session and process identity is definitively
+  dead; the record is eligible for agent recovery.
+- `source-missing` — a work lease's optional source path is absent.
+- `target-absent` — a claimed edit target is absent, which can be expected
+  while creating it.
+- `awaiting-materialization` — an experiment number is reserved but its
+  `EXP-NNN-*.md` file is not present yet.
+- `materialized` — the experiment file exists, so the reservation is redundant
+  and its owner should release it.
+
+`recover_coordination` revalidates liveness and releases another session's
+record only when that exact owner process is dead. Live and manual owners remain
+protected. Before
+recovering an experiment reservation whose file is absent, inspect jobs and
+artifacts that may already use its ID. Normal owner release remains
+`release_claim` or `release_work`; an operator can still use the CLI release
+commands for an exceptional manual override.
+
+CLI equivalents support inspection, manual ownership, and recovery:
+
+```bash
+agent-mail work list [--project <dir> | --all] [--type <type>] [--owner <owner>]
+agent-mail work acquire --type <type> --key <key> [--label <label>] [--source <path>]
+agent-mail work update --id <work-id> [--state working|waiting] [--activity <text>]
+agent-mail work release --id <work-id> [--project <dir>]
+agent-mail coordination list [--project <dir> | --all] [--kind <kind>]
+agent-mail coordination recover --id <coordination-id>
 ```
 
 ## Client integration and updates
@@ -407,6 +474,12 @@ agent-mail claim-experiment [--project <dir>] [--notebook <dir>]
 agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>]
 agent-mail claims [--project <dir>]
 agent-mail release-claim --id <claim-id> [--project <dir>]
+agent-mail work list [--project <dir> | --all] [--type <type>] [--owner <owner>]
+agent-mail work acquire --type <type> --key <key> [--label <label>] [--source <path>]
+agent-mail work update --id <work-id> [--state working|waiting] [--activity <text>]
+agent-mail work release --id <work-id> [--project <dir>]
+agent-mail coordination list [--project <dir> | --all] [--kind <kind>]
+agent-mail coordination recover --id <coordination-id>
 agent-mail dashboard [--port N] [--open] [--no-tui]   # web dashboard
 agent-mail slack-dashboard [--watch <seconds>]        # editable Slack dashboard
 agent-mail start|stop|restart|status  # daemon (launchd-aware)
@@ -418,12 +491,17 @@ agent-mail uninstall
 
 ## Dashboards
 
-`agent-mail dashboard` serves a local web page (default port = daemon port + 1)
-showing live sessions, sender→recipient traffic, hourly volume, and a flight
-log, polling every two seconds. In a terminal it stays attached. Press `o` to
-open it again in the browser, or press `q` to quit. Pass `--open` to open the
-browser on start. Pass `--no-tui` to serve without the terminal interface. It
-reads spools directly, so it works even when the daemon is down.
+The installed daemon continuously serves a read-only dashboard at its base URL
+(`http://127.0.0.1:8377/` by default). It shows live sessions, unified
+coordination health, sender→recipient traffic, hourly volume, and a flight log,
+polling every two seconds. `agent-mail status` prints the configured URL.
+
+`agent-mail dashboard` reports that persistent URL; pass `--open` to open it.
+When the daemon is down it automatically starts the previous direct-filesystem
+fallback on the daemon port plus one. An explicit `--port N` always starts the
+fallback. Its terminal controls remain `o` to open and `q` to quit; use
+`--no-tui` for a plain long-running server. Both forms read the filesystem
+source of truth. Recovery remains available through MCP and the CLI.
 
 `agent-mail slack-dashboard` posts the same summary as a single Slack message
 and edits it in place on each run (`--watch <seconds>` to refresh on a timer).
@@ -531,6 +609,8 @@ boundary. Deliberate Claude `/rename` names are kept verbatim.
 
 | Endpoint | Description |
 |---|---|
+| `GET /` | persistent read-only web dashboard |
+| `GET /api/state` | dashboard state, including unified coordination health |
 | `POST /notify` | `{project, message, from?, meta?, idempotencyKey?, ttlSeconds?, slackEcho?}` → guarded spool + optional Slack echo |
 | `POST /read` | `{project, ids}` or `{project, all:true}` → mark messages read |
 | `GET /health` | liveness + config summary |

@@ -3,8 +3,9 @@
  * Reads the spools and the live registry directly — no daemon dependency, so a
  * dashboard works even when the daemon is down. */
 
+import { type CoordinationEntry, listCoordination } from "./coordination.ts";
 import { displayName } from "./paths.ts";
-import { listLive } from "./registry.ts";
+import { type Registration, listLive } from "./registry.ts";
 import {
   activityTag,
   claudeSessions,
@@ -47,13 +48,57 @@ export interface VolumeBucket {
   count: number;
 }
 
+export interface WorkEntry {
+  id: string;
+  project: string;
+  resourceType: string;
+  resourceKey: string;
+  resourceLabel?: string;
+  sourcePath?: string;
+  owner: string;
+  ownerSessionId?: string;
+  ownerLive: boolean;
+  state: string;
+  activity?: string;
+  updatedAt: string;
+}
+
 export interface DashboardState {
   now: string;
-  totals: { messages: number; projects: number; threads: number; live: number };
+  totals: {
+    messages: number;
+    projects: number;
+    threads: number;
+    live: number;
+    work: number;
+    claims: number;
+    coordination: number;
+  };
   presence: PresenceEntry[];
+  work: WorkEntry[];
+  coordination: CoordinationEntry[];
   routes: FlowRoute[];
   log: LogEntry[];
   volume: VolumeBucket[];
+}
+
+function activeWork(entries: CoordinationEntry[]): WorkEntry[] {
+  return entries
+    .filter((entry) => entry.kind === "work")
+    .map((entry) => ({
+      id: entry.id,
+      project: entry.projectLabel,
+      resourceType: entry.resourceType,
+      resourceKey: entry.resourceKey,
+      resourceLabel: entry.resourceLabel,
+      sourcePath: entry.sourcePaths[0],
+      owner: entry.owner.label,
+      ownerSessionId: entry.owner.sessionId,
+      ownerLive: entry.ownerStatus !== "offline",
+      state: entry.state ?? "working",
+      activity: entry.activity,
+      updatedAt: entry.updatedAt,
+    }));
 }
 
 /** One-line snippet of a message body. */
@@ -62,9 +107,9 @@ function preview(text: string, max = 120): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
-function presence(): PresenceEntry[] {
+function presence(registrations: Registration[]): PresenceEntry[] {
   const meta = claudeSessions();
-  return listLive()
+  return registrations
     .map((r) => {
       // Derive the label from live Claude meta + cwd; the registry `name`
       // snapshot may be stale (a rename) or a legacy synthetic id.
@@ -90,6 +135,7 @@ function presence(): PresenceEntry[] {
               r.capabilities.channelPush ? "channel" : "poll",
               r.capabilities.nativePeerMessaging ? "native-peer" : undefined,
               r.capabilities.claims ? "claims" : undefined,
+              r.capabilities.workLeases ? "work" : undefined,
               r.capabilities.receipts ? "receipts" : undefined,
             ].filter((value): value is string => Boolean(value))
           : [],
@@ -152,6 +198,12 @@ export function buildState(opts: { logLimit?: number } = {}): DashboardState {
   const logLimit = opts.logLimit ?? 60;
   const msgs = readAllMessages();
   const now = new Date();
+  const live = listLive();
+  const coordination = listCoordination({
+    allProjects: true,
+    registrations: live,
+  });
+  const leases = activeWork(coordination);
   const log: LogEntry[] = msgs
     .slice(-logLimit)
     .reverse()
@@ -168,9 +220,14 @@ export function buildState(opts: { logLimit?: number } = {}): DashboardState {
       messages: msgs.length,
       projects: new Set(msgs.map((m) => m.project)).size,
       threads: new Set(msgs.map((m) => m.threadId ?? m.id)).size,
-      live: listLive().length,
+      live: live.length,
+      work: leases.length,
+      claims: coordination.filter((entry) => entry.kind !== "work").length,
+      coordination: coordination.length,
     },
-    presence: presence(),
+    presence: presence(live),
+    work: leases,
+    coordination,
     routes: routes(msgs),
     log,
     volume: volume(msgs, now),

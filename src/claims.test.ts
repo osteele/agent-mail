@@ -204,6 +204,43 @@ test("releaseOwner clears all claims held by one session", () => {
   ]);
 });
 
+test("a conflicting path claim from a dead session is displaced atomically", () => {
+  const { project, store } = fixture();
+  const stale = store.claimPaths(
+    project,
+    [
+      { path: join(project, "occupied.swift"), pathType: "file" },
+      { path: join(project, "other.swift"), pathType: "file" },
+    ],
+    ownerA,
+  );
+
+  const replacement = store.claimPath(
+    project,
+    join(project, "occupied.swift"),
+    "file",
+    ownerB,
+    { ownerIsLive: (owner) => owner.id !== stale.owner.id },
+  );
+
+  expect(store.list(project)).toEqual([replacement]);
+});
+
+test("recovery only removes a claim whose owner is definitively offline", () => {
+  const { project, store } = fixture();
+  const claim = store.claimPath(
+    project,
+    join(project, "notes.md"),
+    "file",
+    ownerA,
+  );
+  expect(() => store.recover(project, claim.id, () => true)).toThrow(
+    "live or cannot be verified offline",
+  );
+  expect(store.recover(project, claim.id, () => false)).toEqual(claim);
+  expect(store.listAll()).toEqual([]);
+});
+
 test("an abandoned transaction lock does not permanently block claims", () => {
   const { project, notebook } = fixture();
   const root = dirname(project);

@@ -44,6 +44,7 @@ export interface SessionCapabilities {
   inboxPoll: boolean;
   channelPush: boolean;
   claims: boolean;
+  workLeases: boolean;
   receipts: boolean;
   nativePeerMessaging: boolean;
 }

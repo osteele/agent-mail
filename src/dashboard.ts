@@ -73,16 +73,19 @@ const PAGE = String.raw`<!doctype html>
   <span class="stat"><b id="t-projects">&ndash;</b> projects</span>
   <span class="stat"><b id="t-threads">&ndash;</b> threads</span>
   <span class="stat"><b id="t-live">&ndash;</b> live</span>
+  <span class="stat"><b id="t-coordination">&ndash;</b> coordination</span>
   <span class="age" id="age"></span>
 </header>
 <nav role="tablist" aria-label="Dashboard views">
   <button class="tab" id="tab-sessions" role="tab" aria-selected="true" aria-controls="view-sessions" data-view="sessions">Sessions</button>
+  <button class="tab" id="tab-coordination" role="tab" aria-selected="false" aria-controls="view-coordination" data-view="coordination">Coordination</button>
   <button class="tab" id="tab-traffic" role="tab" aria-selected="false" aria-controls="view-traffic" data-view="traffic">Traffic</button>
   <button class="tab" id="tab-volume" role="tab" aria-selected="false" aria-controls="view-volume" data-view="volume">Volume</button>
   <button class="tab" id="tab-log" role="tab" aria-selected="false" aria-controls="view-log" data-view="log">Flight log</button>
 </nav>
 <main>
   <section id="view-sessions" role="tabpanel" aria-labelledby="tab-sessions"><h2>Live sessions</h2><div id="presence"></div></section>
+  <section id="view-coordination" role="tabpanel" aria-labelledby="tab-coordination" hidden><h2>Work, edit claims, and experiment reservations</h2><div class="muted" style="margin-bottom:10px">Read-only monitor. Agents inspect with list_coordination and safely release dead-session records with recover_coordination.</div><div id="coordination"></div></section>
   <section id="view-traffic" role="tabpanel" aria-labelledby="tab-traffic" hidden><h2>Traffic (sender &rarr; recipient)</h2><div id="routes"></div></section>
   <section id="view-volume" role="tabpanel" aria-labelledby="tab-volume" hidden><h2>Volume &middot; last 24h</h2><div class="vol" id="volume"></div></section>
   <section id="view-log" role="tabpanel" aria-labelledby="tab-log" hidden><h2>Flight log</h2><table><tbody id="log"></tbody></table></section>
@@ -110,6 +113,7 @@ function render(s) {
   $("t-projects").textContent = s.totals.projects;
   $("t-threads").textContent = s.totals.threads;
   $("t-live").textContent = s.totals.live;
+  $("t-coordination").textContent = s.totals.coordination;
   $("age").textContent = "updated " + time(s.now);
 
   $("presence").innerHTML = s.presence.length
@@ -124,6 +128,22 @@ function render(s) {
         (p.muted ? ' <span class="muted">🔕 muted</span>' : '') +
         '</div>').join("")
     : '<div class="empty">no sessions listening</div>';
+
+  const conditionColor = (condition) =>
+    condition === "owner-offline" || condition === "source-missing" || condition === "materialized"
+      ? "#d29922"
+      : condition === "healthy" ? "#3fb950" : "#2f81f7";
+  $("coordination").innerHTML = s.coordination.length
+    ? s.coordination.map((c) =>
+        '<div class="row"><span class="dot" style="background:' + conditionColor(c.condition) + '"></span>' +
+        '<b>' + esc(c.projectLabel) + '</b> <span>' + esc(c.resourceLabel || c.resourceKey) + '</span>' +
+        ' <span class="client">' + esc(c.kind) + '</span>' +
+        ' <span class="muted">' + esc(c.owner.label) + (c.state ? ' [' + esc(c.state) + ']' : '') + '</span>' +
+        (c.activity ? ' <span class="muted">' + esc(c.activity) + '</span>' : '') +
+        ' <span class="client">' + esc(c.condition) + '</span>' +
+        (c.recoverable ? ' <span class="muted">[agent-recoverable]</span>' : '') +
+        '</div>').join("")
+    : '<div class="empty">no active coordination</div>';
 
   const max = Math.max(1, ...s.routes.map((r) => r.count));
   $("routes").innerHTML = s.routes.length
@@ -159,25 +179,33 @@ setInterval(tick, 2000);
 </body>
 </html>`;
 
-/** Start the dashboard HTTP server on 127.0.0.1. Pass port 0 for an ephemeral
+/** Serve one dashboard request. Shared with the persistent daemon so its
+ * always-on HTTP service and the standalone fallback render identical state. */
+export function dashboardResponse(request: Request): Response | undefined {
+  const { pathname } = new URL(request.url);
+  if (pathname === "/" || pathname === "/index.html") {
+    return new Response(PAGE, {
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
+  if (pathname === "/api/state") {
+    return new Response(JSON.stringify(buildState()), {
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+  return undefined;
+}
+
+/** Start the standalone dashboard on 127.0.0.1. Pass port 0 for an ephemeral
  * port; the chosen port is available as `server.port`. */
 export function serveDashboard(port: number): ReturnType<typeof Bun.serve> {
   return Bun.serve({
     port,
     hostname: "127.0.0.1",
     fetch(req) {
-      const { pathname } = new URL(req.url);
-      if (pathname === "/" || pathname === "/index.html") {
-        return new Response(PAGE, {
-          headers: { "Content-Type": "text/html; charset=utf-8" },
-        });
-      }
-      if (pathname === "/api/state") {
-        return new Response(JSON.stringify(buildState()), {
-          headers: { "Content-Type": "application/json" },
-        });
-      }
-      return new Response("not found", { status: 404 });
+      return (
+        dashboardResponse(req) ?? new Response("not found", { status: 404 })
+      );
     },
   });
 }

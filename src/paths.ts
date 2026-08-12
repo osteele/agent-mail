@@ -7,6 +7,7 @@
  *   registry/<id>.json     live channel-server registrations
  *   session-names/<id>.json persistent generated session names
  *   claims/<slug>/          experiment-number and path claims
+ *   work/<slug>/            exclusive logical-work leases
  *   presence.json          daemon snapshot of the live registry
  *   daemon.pid, daemon.log daemon state
  * Config:     ~/.config/agent-mail/config.toml
@@ -24,6 +25,7 @@ export const RECEIPTS_DIR = join(STATE_DIR, "receipts");
 export const REGISTRY_DIR = join(STATE_DIR, "registry");
 export const SESSION_NAMES_DIR = join(STATE_DIR, "session-names");
 export const CLAIMS_DIR = join(STATE_DIR, "claims");
+export const WORK_DIR = join(STATE_DIR, "work");
 export const CONFIG_DIR = join(homedir(), ".config", "agent-mail");
 export const CONFIG_PATH = join(CONFIG_DIR, "config.toml");
 export const PID_PATH = join(STATE_DIR, "daemon.pid");
@@ -46,6 +48,7 @@ export function ensureDirs(): void {
     REGISTRY_DIR,
     SESSION_NAMES_DIR,
     CLAIMS_DIR,
+    WORK_DIR,
     CONFIG_DIR,
   ]) {
     mkdirSync(dir, { recursive: true });

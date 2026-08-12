@@ -5,6 +5,8 @@
  *   POST /notify   {project, from, message, meta?} -> append spool, echo Slack
  *   POST /read     {project, ids?} or {project, all:true} -> mark read
  *   GET  /health   daemon liveness + config summary
+ *   GET  /          persistent read-only dashboard
+ *   GET  /api/state dashboard JSON
  *   GET  /registry live channel-server registrations
  *   GET  /inbox?project=<path>&limit=N&unread=1  read a project's spool
  *
@@ -13,6 +15,7 @@
 
 import { appendFileSync, writeFileSync } from "node:fs";
 import { type Config, loadConfig } from "./config.ts";
+import { dashboardResponse } from "./dashboard.ts";
 import { LOG_PATH, PID_PATH, canonicalProject, ensureDirs } from "./paths.ts";
 import { writePresenceSnapshot } from "./presence.ts";
 import { listLive } from "./registry.ts";
@@ -94,6 +97,11 @@ const server = Bun.serve({
   hostname: "127.0.0.1",
   async fetch(req) {
     const url = new URL(req.url);
+
+    if (req.method === "GET") {
+      const dashboard = dashboardResponse(req);
+      if (dashboard) return dashboard;
+    }
 
     if (req.method === "GET" && url.pathname === "/health") {
       return json({
