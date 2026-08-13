@@ -22,6 +22,7 @@ export interface WorkOwner {
   sessionId?: string;
   pid?: number;
   procStart?: string;
+  instanceId?: string;
 }
 
 export interface WorkResource {
@@ -97,6 +98,33 @@ function validateText(
     throw new Error(`${name} must not contain control characters`);
   }
   return trimmed;
+}
+
+function sameOwnerProcess(a: WorkOwner, b: WorkOwner): boolean {
+  if (a.id !== b.id) return false;
+  if (a.instanceId || b.instanceId) {
+    return a.instanceId !== undefined && a.instanceId === b.instanceId;
+  }
+  if (a.procStart || b.procStart) {
+    return (
+      a.pid !== undefined &&
+      a.pid === b.pid &&
+      a.procStart !== undefined &&
+      a.procStart === b.procStart
+    );
+  }
+  return (
+    a.pid === undefined && b.pid === undefined && !a.sessionId && !b.sessionId
+  );
+}
+
+function ownerMatches(
+  owner: WorkOwner,
+  credential: string | WorkOwner,
+): boolean {
+  return typeof credential === "string"
+    ? owner.id === credential
+    : sameOwnerProcess(owner, credential);
 }
 
 export class WorkStore {
@@ -239,32 +267,44 @@ export class WorkStore {
 
     return this.withLock(canonical, () => {
       const activity = validateText(options.activity, "activity");
-      const existing = this.list(canonical).find(
+      const existing = this.list(canonical).filter(
         (lease) =>
           lease.resource.type === normalizedResource.type &&
           lease.resource.key === normalizedResource.key,
       );
+      const owned = existing.find((lease) =>
+        sameOwnerProcess(lease.owner, owner),
+      );
+      const conflicts = existing.filter(
+        (lease) => !sameOwnerProcess(lease.owner, owner),
+      );
       const now = new Date().toISOString();
-      if (existing?.owner.id === owner.id) {
+      for (const conflict of conflicts) {
+        if (
+          !options.ownerIsLive ||
+          options.ownerIsLive(conflict.owner, conflict)
+        ) {
+          throw new WorkConflictError(conflict);
+        }
+      }
+      if (owned) {
         const updated: WorkLease = {
-          ...existing,
+          ...owned,
           resource: normalizedResource,
           owner,
-          state: options.state ?? existing.state,
+          state: options.state ?? owned.state,
           ...(options.activity !== undefined ? { activity } : {}),
           updatedAt: now,
         };
         this.write(updated, true);
-        return updated;
-      }
-      if (existing) {
-        if (
-          !options.ownerIsLive ||
-          options.ownerIsLive(existing.owner, existing)
-        ) {
-          throw new WorkConflictError(existing);
+        for (const duplicate of existing) {
+          if (duplicate.id !== owned.id) {
+            unlinkSync(
+              join(this.projectDir(canonical), `${duplicate.id}.json`),
+            );
+          }
         }
-        unlinkSync(join(this.projectDir(canonical), `${existing.id}.json`));
+        return updated;
       }
       const lease: WorkLease = {
         version: 1,
@@ -278,6 +318,14 @@ export class WorkStore {
         updatedAt: now,
       };
       this.write(lease);
+      if (existing.length > 0) {
+        // Publish the replacement before removing the stale owner. An
+        // interruption may over-block with two records but cannot create a
+        // window where the resource has no owner.
+        for (const stale of existing) {
+          unlinkSync(join(this.projectDir(canonical), `${stale.id}.json`));
+        }
+      }
       return lease;
     });
   }
@@ -285,14 +333,14 @@ export class WorkStore {
   update(
     project: string,
     leaseId: string,
-    ownerId: string,
+    owner: string | WorkOwner,
     changes: { state?: WorkState; activity?: string },
   ): WorkLease {
     const canonical = canonicalProject(project);
     return this.withLock(canonical, () => {
       const lease = this.list(canonical).find((item) => item.id === leaseId);
       if (!lease) throw new Error(`work lease not found: ${leaseId}`);
-      if (lease.owner.id !== ownerId) {
+      if (!ownerMatches(lease.owner, owner)) {
         throw new Error(
           `work lease ${leaseId} belongs to ${lease.owner.label}; only its owner can update it`,
         );
@@ -310,12 +358,16 @@ export class WorkStore {
     });
   }
 
-  release(project: string, leaseId: string, ownerId?: string): WorkLease {
+  release(
+    project: string,
+    leaseId: string,
+    owner?: string | WorkOwner,
+  ): WorkLease {
     const canonical = canonicalProject(project);
     return this.withLock(canonical, () => {
       const lease = this.list(canonical).find((item) => item.id === leaseId);
       if (!lease) throw new Error(`work lease not found: ${leaseId}`);
-      if (ownerId && lease.owner.id !== ownerId) {
+      if (owner && !ownerMatches(lease.owner, owner)) {
         throw new Error(
           `work lease ${leaseId} belongs to ${lease.owner.label}; only its owner can release it`,
         );
@@ -344,11 +396,13 @@ export class WorkStore {
     });
   }
 
-  releaseOwner(project: string, ownerId: string): number {
+  releaseOwner(project: string, ownerId: string, ownerPid?: number): number {
     const canonical = canonicalProject(project);
     return this.withLock(canonical, () => {
       const leases = this.list(canonical).filter(
-        (lease) => lease.owner.id === ownerId,
+        (lease) =>
+          lease.owner.id === ownerId &&
+          (ownerPid === undefined || lease.owner.pid === ownerPid),
       );
       for (const lease of leases) {
         unlinkSync(join(this.projectDir(canonical), `${lease.id}.json`));

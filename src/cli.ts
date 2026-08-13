@@ -7,12 +7,12 @@
  *   agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
  *   agent-mail listeners [--project <dir>] [--json] [--no-sync]
  *   agent-mail mute|unmute (--session <name-or-id> | --project <dir>)
- *   agent-mail claim-experiment [--project <dir>] [--notebook <dir>]
- *   agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>]
+ *   agent-mail claim-experiment [--project <dir>] [--notebook <dir>] [--owner <label>]
+ *   agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>] [--owner <label>]
  *   agent-mail claims [--project <dir>]
  *   agent-mail release-claim --id <claim-id> [--project <dir>]
  *   agent-mail work list [--project <dir> | --all]
- *   agent-mail work acquire --type <type> --key <key> [--project <dir>]
+ *   agent-mail work acquire --type <type> --key <key> [--project <dir>] [--owner <label>]
  *   agent-mail work update --id <work-id> [--state working|waiting]
  *   agent-mail work release --id <work-id> [--project <dir>]
  *   agent-mail coordination list [--project <dir> | --all]
@@ -677,7 +677,7 @@ function cliOwner(
   flags: Record<string, string | boolean>,
   project: string,
 ): ClaimOwner {
-  const label = typeof flags.owner === "string" ? flags.owner : "cli";
+  const label = typeof flags.owner === "string" ? flags.owner : undefined;
   const sessionId =
     process.env.CLAUDE_CODE_SESSION_ID ?? process.env.CODEX_THREAD_ID;
   if (sessionId) {
@@ -694,17 +694,25 @@ function cliOwner(
       );
       return {
         id: sessionId,
-        label: typeof flags.owner === "string" ? label : identity.displayName,
+        label: label ?? identity.displayName,
         sessionId,
         pid: registration.pid,
         ...(registration.procStart
           ? { procStart: registration.procStart }
           : {}),
+        ...(registration.instanceId
+          ? { instanceId: registration.instanceId }
+          : {}),
       };
     }
   }
+  if (!label) {
+    throw new Error(
+      "coordination acquisition outside a registered agent session requires --owner <label>",
+    );
+  }
   return {
-    id: typeof flags.owner === "string" ? `cli:${flags.owner}` : "cli",
+    id: `cli:${label}`,
     label,
   };
 }
@@ -748,14 +756,14 @@ function cmdClaimPath(
   }
   const project = claimProject(flags);
   const pathType = flags.directory === true ? "directory" : "file";
-  const live = listLive();
   const claim = claims.claimPaths(
     project,
     paths.map((path) => ({ path: resolve(project, path), pathType })),
     cliOwner(flags, project),
     {
       ownerIsLive: (owner, claim) =>
-        coordinationOwnerStatus(owner, live, claim.createdAt) !== "offline",
+        coordinationOwnerStatus(owner, listLive(), claim.createdAt) !==
+        "offline",
     },
   );
   console.log(`${claim.id}`);
@@ -892,7 +900,6 @@ function cmdWork(
     }
     const project = claimProject(flags);
     const owner = cliOwner(flags, project);
-    const live = listLive();
     const lease = work.acquire(
       project,
       {
@@ -909,11 +916,11 @@ function cmdWork(
         activity:
           typeof flags.activity === "string" ? flags.activity : undefined,
         ownerIsLive: (candidate, existing) =>
-          coordinationOwnerStatus(candidate, live, existing.createdAt) !==
+          coordinationOwnerStatus(candidate, listLive(), existing.createdAt) !==
           "offline",
       },
     );
-    console.log(describeWork(lease, live));
+    console.log(describeWork(lease));
     return;
   }
 
@@ -1430,6 +1437,7 @@ Coordination:
                         List exclusive logical-work leases
   work acquire --type <type> --key <key> [--label <label>] [--source <path>]
                [--state working|waiting] [--activity <text>] [--project <dir>]
+               [--owner <label>]
                         Acquire exclusive responsibility for logical work
   work update --id <work-id> [--state working|waiting] [--activity <text>]
                         Update a work lease

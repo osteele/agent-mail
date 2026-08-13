@@ -282,8 +282,8 @@ target, and condition. Check the intended edit before recovering the record.
 The equivalent CLI is useful for inspection and recovery:
 
 ```bash
-agent-mail claim-experiment [--project <dir>] [--notebook <dir>]
-agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>]
+agent-mail claim-experiment [--project <dir>] [--notebook <dir>] [--owner <label>]
+agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>] [--owner <label>]
 agent-mail claims [--project <dir>]
 agent-mail release-claim --id <claim-id> [--project <dir>]
 ```
@@ -305,8 +305,8 @@ activity. `release_work` relinquishes responsibility.
 Coordination CLI commands run from a registered Claude Code or Codex shell use
 that host's session identity, so their leases and claims have the same liveness
 and shutdown behavior as MCP tool calls. CLI commands outside a registered
-agent session create deliberately durable manual ownership. Give those records
-an `--owner` label and release them explicitly when the operator's work ends.
+agent session require an `--owner` label and create deliberately durable manual
+ownership. Release those records explicitly when the operator's work ends.
 
 `list_work` defaults to the current project. Pass `all_projects: true` for a
 cross-project view, or filter by resource type or owner. `list_sessions` also
@@ -353,7 +353,7 @@ CLI equivalents support inspection, manual ownership, and recovery:
 
 ```bash
 agent-mail work list [--project <dir> | --all] [--type <type>] [--owner <owner>]
-agent-mail work acquire --type <type> --key <key> [--label <label>] [--source <path>]
+agent-mail work acquire --type <type> --key <key> [--label <label>] [--source <path>] [--owner <label>]
 agent-mail work update --id <work-id> [--state working|waiting] [--activity <text>]
 agent-mail work release --id <work-id> [--project <dir>]
 agent-mail coordination list [--project <dir> | --all] [--kind <kind>]
@@ -486,12 +486,12 @@ agent-mail status-line [--project <dir>] [--session <id>] [--debug]  # see below
 agent-mail mute|unmute (--session <name-or-id> | --project <dir>)  # pause/resume push
 agent-mail inbound --policy accept|hold|refuse \
   (--session <name-or-id> | --project <dir>)
-agent-mail claim-experiment [--project <dir>] [--notebook <dir>]
-agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>]
+agent-mail claim-experiment [--project <dir>] [--notebook <dir>] [--owner <label>]
+agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>] [--owner <label>]
 agent-mail claims [--project <dir>]
 agent-mail release-claim --id <claim-id> [--project <dir>]
 agent-mail work list [--project <dir> | --all] [--type <type>] [--owner <owner>]
-agent-mail work acquire --type <type> --key <key> [--label <label>] [--source <path>]
+agent-mail work acquire --type <type> --key <key> [--label <label>] [--source <path>] [--owner <label>]
 agent-mail work update --id <work-id> [--state working|waiting] [--activity <text>]
 agent-mail work release --id <work-id> [--project <dir>]
 agent-mail coordination list [--project <dir> | --all] [--kind <kind>]

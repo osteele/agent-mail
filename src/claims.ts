@@ -22,6 +22,7 @@ export interface ClaimOwner {
   sessionId?: string;
   pid?: number;
   procStart?: string;
+  instanceId?: string;
 }
 
 interface ClaimBase {
@@ -87,6 +88,33 @@ export class ClaimConflictError extends Error {
     super(`${resource} is claimed by ${claim.owner.label} (${claim.id})`);
     this.name = "ClaimConflictError";
   }
+}
+
+function sameOwnerProcess(a: ClaimOwner, b: ClaimOwner): boolean {
+  if (a.id !== b.id) return false;
+  if (a.instanceId || b.instanceId) {
+    return a.instanceId !== undefined && a.instanceId === b.instanceId;
+  }
+  if (a.procStart || b.procStart) {
+    return (
+      a.pid !== undefined &&
+      a.pid === b.pid &&
+      a.procStart !== undefined &&
+      a.procStart === b.procStart
+    );
+  }
+  return (
+    a.pid === undefined && b.pid === undefined && !a.sessionId && !b.sessionId
+  );
+}
+
+function ownerMatches(
+  owner: ClaimOwner,
+  credential: string | ClaimOwner,
+): boolean {
+  return typeof credential === "string"
+    ? owner.id === credential
+    : sameOwnerProcess(owner, credential);
 }
 
 function canonicalPath(path: string): string {
@@ -287,6 +315,7 @@ export class ClaimStore {
       canonicalTargets.push({ path, pathType: target.pathType });
     }
     return this.withLock(canonical, () => {
+      const staleClaims: Claim[] = [];
       for (const claim of this.list(canonical)) {
         if (claim.type !== "path") continue;
         let conflictingPath: string | undefined;
@@ -303,10 +332,7 @@ export class ClaimStore {
         if (!options.ownerIsLive || options.ownerIsLive(claim.owner, claim)) {
           throw new ClaimConflictError(claim, conflictingPath);
         }
-        // A grouped claim is one ownership transaction. If its process is
-        // definitively dead, remove the whole stale edit set before publishing
-        // the replacement rather than leaving unrelated members orphaned.
-        unlinkSync(join(this.projectDir(canonical), `${claim.id}.json`));
+        staleClaims.push(claim);
       }
       const claim: PathClaim = {
         id: randomUUID(),
@@ -323,6 +349,11 @@ export class ClaimStore {
         createdAt: new Date().toISOString(),
       };
       this.write(claim);
+      // Publishing first makes interruption conservative: a crash can leave
+      // duplicate blockers, but never an unowned gap in the edit set.
+      for (const stale of staleClaims) {
+        unlinkSync(join(this.projectDir(canonical), `${stale.id}.json`));
+      }
       return claim;
     });
   }
@@ -344,8 +375,9 @@ export class ClaimStore {
       throw new Error(`experiments directory does not exist: ${experiments}`);
     }
     return this.withLock(canonical, () => {
-      const fileNumbers = readdirSync(experiments)
-        .map((name) => /^EXP-(\d+)(?:-|\.md$)/.exec(name)?.[1])
+      const fileNumbers = readdirSync(experiments, { withFileTypes: true })
+        .filter((entry) => entry.isFile())
+        .map((entry) => /^EXP-(\d+)(?:\.md|-[^/]+\.md)$/.exec(entry.name)?.[1])
         .filter((value): value is string => value !== undefined)
         .map(Number);
       const claimedNumbers = this.list(canonical)
@@ -371,12 +403,16 @@ export class ClaimStore {
     });
   }
 
-  release(project: string, claimId: string, ownerId?: string): Claim {
+  release(
+    project: string,
+    claimId: string,
+    owner?: string | ClaimOwner,
+  ): Claim {
     const canonical = canonicalProject(project);
     return this.withLock(canonical, () => {
       const claim = this.list(canonical).find((item) => item.id === claimId);
       if (!claim) throw new Error(`claim not found: ${claimId}`);
-      if (ownerId && claim.owner.id !== ownerId) {
+      if (owner && !ownerMatches(claim.owner, owner)) {
         throw new Error(
           `claim ${claimId} belongs to ${claim.owner.label}; only its owner can release it`,
         );
@@ -405,11 +441,13 @@ export class ClaimStore {
     });
   }
 
-  releaseOwner(project: string, ownerId: string): number {
+  releaseOwner(project: string, ownerId: string, ownerPid?: number): number {
     const canonical = canonicalProject(project);
     return this.withLock(canonical, () => {
       const claims = this.list(canonical).filter(
-        (claim) => claim.owner.id === ownerId,
+        (claim) =>
+          claim.owner.id === ownerId &&
+          (ownerPid === undefined || claim.owner.pid === ownerPid),
       );
       for (const claim of claims) {
         unlinkSync(join(this.projectDir(canonical), `${claim.id}.json`));

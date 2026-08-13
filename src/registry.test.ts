@@ -4,15 +4,25 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   realpathSync,
   rmSync,
+  rmdirSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REGISTRY_DIR, projectSlug } from "./paths.ts";
-import { listLiveInProject, parsePsLine } from "./registry.ts";
+import {
+  listLiveInProject,
+  parsePsLine,
+  register,
+  scanProcesses,
+  setInboundPolicy,
+  setMuted,
+  touchInboxPoll,
+} from "./registry.ts";
 
 test("parsePsLine handles macOS lstart (incl. padded day) and spaced commands", () => {
   const parsed = parsePsLine(
@@ -36,6 +46,183 @@ test("parsePsLine rejects blank and malformed lines", () => {
   expect(parsePsLine("")).toBeUndefined();
   expect(parsePsLine("not a ps line")).toBeUndefined();
   expect(parsePsLine("abc Sat Aug 1 10:48:00 2026 cmd")).toBeUndefined();
+});
+
+test("a failed process inspection is distinguishable from an empty live set", () => {
+  const scan = scanProcesses([process.pid], "/definitely/missing/ps");
+  expect(scan.reliable).toBe(false);
+  expect(scan.processes).toEqual(new Map());
+
+  const nonconforming = scanProcesses([process.pid], "/bin/sh");
+  expect(nonconforming.reliable).toBe(false);
+  expect(nonconforming.processes).toEqual(new Map());
+
+  const manyPids = Array.from({ length: 13 }, (_, index) => index + 1);
+  expect(scanProcesses(manyPids, "/usr/bin/false").reliable).toBe(false);
+  expect(scanProcesses(manyPids, "/usr/bin/true").reliable).toBe(false);
+});
+
+test("register does not inherit state from a recycled pid", () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-register-recycled-"));
+  const project = join(root, "project");
+  mkdirSync(project);
+  const path = register(project, process.pid, "old-session");
+  try {
+    writeFileSync(
+      path,
+      JSON.stringify({
+        cwd: project,
+        pid: process.pid,
+        procStart: "Mon Jan 1 00:00:00 1990",
+        sessionId: "old-session",
+        muted: true,
+        inboundPolicy: "refuse",
+        started: "1990-01-01T00:00:00.000Z",
+      }),
+    );
+
+    register(project, process.pid, "new-session");
+    const current = JSON.parse(readFileSync(path, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(current.sessionId).toBe("new-session");
+    expect(current.procStart).not.toBe("Mon Jan 1 00:00:00 1990");
+    expect(current.muted).toBeUndefined();
+    expect(current.inboundPolicy).toBe("accept");
+    expect(current.started).not.toBe("1990-01-01T00:00:00.000Z");
+  } finally {
+    if (existsSync(path)) rmSync(path);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the exact process preserves session state across re-registration", () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-register-same-"));
+  const project = join(root, "project");
+  mkdirSync(project);
+  const path = register(project, process.pid, "same-session");
+  try {
+    expect(setMuted(project, process.pid, true)).toBe(true);
+    expect(setInboundPolicy(project, process.pid, "hold")).toBe(true);
+    touchInboxPoll(project, process.pid);
+    const before = JSON.parse(readFileSync(path, "utf8")) as Record<
+      string,
+      unknown
+    >;
+
+    register(project, process.pid, "same-session", undefined, "codex");
+    const after = JSON.parse(readFileSync(path, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(after).toMatchObject({
+      muted: true,
+      inboundPolicy: "hold",
+      lastSeen: before.lastSeen,
+      lastInboxPoll: before.lastInboxPoll,
+      started: before.started,
+      client: "codex",
+    });
+  } finally {
+    if (existsSync(path)) rmSync(path);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a process instance preserves state without a process-start scan", () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-register-instance-"));
+  const project = join(root, "project");
+  mkdirSync(project);
+  const instanceId = "channel-instance";
+  const path = register(
+    project,
+    process.pid,
+    "same-session",
+    undefined,
+    undefined,
+    undefined,
+    "accept",
+    undefined,
+    instanceId,
+  );
+  try {
+    expect(setMuted(project, process.pid, true)).toBe(true);
+    const before = JSON.parse(readFileSync(path, "utf8")) as Record<
+      string,
+      unknown
+    >;
+
+    register(
+      project,
+      process.pid,
+      "same-session",
+      undefined,
+      "codex",
+      undefined,
+      "accept",
+      undefined,
+      instanceId,
+    );
+    const after = JSON.parse(readFileSync(path, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(after).toMatchObject({
+      instanceId,
+      muted: true,
+      started: before.started,
+      client: "codex",
+    });
+    expect(after.procStart).toBeUndefined();
+  } finally {
+    if (existsSync(path)) rmSync(path);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("registry mutations wait for the entry transaction lock", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-register-lock-"));
+  const project = join(root, "project");
+  mkdirSync(project);
+  const path = register(project, process.pid, "locked-session");
+  const lock = `${path}.lock`;
+  mkdirSync(lock);
+  let lockHeld = true;
+  const source = join(import.meta.dir, "registry.ts");
+  const script = [
+    `const { setMuted } = await import(${JSON.stringify(source)});`,
+    'console.log("ready");',
+    "await Bun.sleep(25);",
+    `console.log(setMuted(${JSON.stringify(project)}, ${process.pid}, true));`,
+  ].join("\n");
+  const child = Bun.spawn([process.execPath, "-e", script], {
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  try {
+    const first = await child.stdout.getReader().read();
+    expect(new TextDecoder().decode(first.value)).toContain("ready");
+    await Bun.sleep(75);
+    expect(child.exitCode).toBeNull();
+
+    rmdirSync(lock);
+    lockHeld = false;
+    expect(await child.exited).toBe(0);
+    const current = JSON.parse(readFileSync(path, "utf8")) as Record<
+      string,
+      unknown
+    >;
+    expect(current.muted).toBe(true);
+  } finally {
+    if (lockHeld && existsSync(lock)) rmdirSync(lock);
+    if (child.exitCode === null) {
+      child.kill();
+      await child.exited;
+    }
+    if (existsSync(path)) rmSync(path);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("listLiveInProject collapses legacy and canonical spellings of one dir", () => {

@@ -54,6 +54,7 @@ import {
   isMuted,
   listLive,
   register,
+  scanProcesses,
   setInboundPolicy,
   setMuted,
   touch,
@@ -105,11 +106,18 @@ const myLabel = mySessionNames.displayName;
 const selfLabel = `${mySessionNames.displayName} (${mySessionNames.fullName}; ${sessionId})`;
 const config = loadConfig();
 const mySpool = spoolPath(cwd);
+const ownerInstanceId = randomUUID();
+const ownerScan = scanProcesses([process.pid]);
+const ownerProcStart = ownerScan.reliable
+  ? ownerScan.processes.get(process.pid)?.start
+  : undefined;
 const claimOwner = {
   id: sessionId,
   label: myLabel,
   sessionId,
   pid: process.pid,
+  ...(ownerProcStart ? { procStart: ownerProcStart } : {}),
+  instanceId: ownerInstanceId,
 };
 const workOwner: WorkOwner = claimOwner;
 let hostClient: string | undefined;
@@ -965,7 +973,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     const pathType: PathClaimTarget["pathType"] = directory
       ? "directory"
       : "file";
-    const live = listLive();
     const claim = claims.claimPaths(
       cwd,
       requested.map((target) => ({
@@ -975,7 +982,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       claimOwner,
       {
         ownerIsLive: (owner, claim) =>
-          ownerStatus(owner, live, claim.createdAt) !== "offline",
+          ownerStatus(owner, listLive(), claim.createdAt) !== "offline",
       },
     );
     const targets = pathClaimTargets(claim);
@@ -1010,7 +1017,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
   if (req.params.name === "release_claim") {
     const { claim_id } = req.params.arguments as { claim_id: string };
-    const claim = claims.release(cwd, claim_id, sessionId);
+    const claim = claims.release(cwd, claim_id, claimOwner);
     return {
       content: [{ type: "text", text: `released ${describeClaim(claim)}` }],
     };
@@ -1025,7 +1032,6 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         state?: WorkState;
         activity?: string;
       };
-    const live = listLive();
     const lease = work.acquire(
       cwd,
       {
@@ -1039,14 +1045,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
         state,
         activity,
         ownerIsLive: (owner, lease) =>
-          workOwnerIsLive(owner, live, lease.createdAt),
+          workOwnerIsLive(owner, listLive(), lease.createdAt),
       },
     );
     return {
       content: [
         {
           type: "text",
-          text: `acquired ${describeWork(lease, live)}`,
+          text: `acquired ${describeWork(lease)}`,
         },
       ],
     };
@@ -1060,7 +1066,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     if (state === undefined && activity === undefined) {
       throw new Error("update_work requires state or activity");
     }
-    const lease = work.update(cwd, work_id, sessionId, { state, activity });
+    const lease = work.update(cwd, work_id, workOwner, { state, activity });
     return {
       content: [{ type: "text", text: `updated ${describeWork(lease)}` }],
     };
@@ -1104,7 +1110,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
   }
   if (req.params.name === "release_work") {
     const { work_id } = req.params.arguments as { work_id: string };
-    const lease = work.release(cwd, work_id, sessionId);
+    const lease = work.release(cwd, work_id, workOwner);
     return {
       content: [{ type: "text", text: `released ${describeWork(lease)}` }],
     };
@@ -1184,6 +1190,8 @@ mcp.oninitialized = () => {
       client,
       sessionCapabilities(client),
       config.inboundPolicy,
+      ownerProcStart,
+      ownerInstanceId,
     );
   }
 };
@@ -1199,6 +1207,8 @@ register(
   undefined,
   sessionCapabilities(),
   config.inboundPolicy,
+  ownerProcStart,
+  ownerInstanceId,
 );
 
 // --- Spool watcher: push lines appended after startup -----------------------
@@ -1346,8 +1356,8 @@ const timer = setInterval(() => void poll(), 1000);
 
 function shutdown(): void {
   clearInterval(timer);
-  claims.releaseOwner(cwd, sessionId);
-  work.releaseOwner(cwd, sessionId);
+  claims.releaseOwner(cwd, sessionId, process.pid);
+  work.releaseOwner(cwd, sessionId, process.pid);
   unregister(cwd, process.pid);
   process.exit(0);
 }

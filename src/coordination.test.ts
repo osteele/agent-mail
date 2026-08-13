@@ -34,9 +34,85 @@ test("owner status distinguishes live, offline, and manual owners", () => {
       [registration],
     ),
   ).toBe("offline");
+  expect(
+    ownerStatus(
+      {
+        id: "session-a",
+        label: "A",
+        sessionId: "session-a",
+        pid: 42,
+        procStart: "different process",
+      },
+      [{ ...registration, procStart: "registered process" }],
+    ),
+  ).toBe("offline");
   expect(ownerStatus({ id: "cli", label: "operator" }, [registration])).toBe(
     "manual",
   );
+});
+
+test("an unavailable process scan does not classify a PID owner as offline", () => {
+  expect(
+    ownerStatus(
+      { id: "cli:42", label: "cli", pid: 42 },
+      [],
+      "2026-08-13T12:00:00.000Z",
+      { processes: new Map(), reliable: false },
+    ),
+  ).toBe("manual");
+});
+
+test("a replacement registration cannot adopt a legacy session-owned record", () => {
+  const owner = {
+    id: "session-a",
+    label: "A",
+    sessionId: "session-a",
+    pid: 42,
+  };
+  const replacement: Registration = {
+    cwd: "/project",
+    pid: 42,
+    procStart: "new process",
+    sessionId: "session-a",
+    started: "2026-08-13T13:00:00.000Z",
+  };
+  expect(ownerStatus(owner, [replacement], "2026-08-13T12:00:00.000Z")).toBe(
+    "offline",
+  );
+});
+
+test("a process instance remains exact without a process-start timestamp", () => {
+  const registration: Registration = {
+    cwd: "/project",
+    pid: 42,
+    sessionId: "session-a",
+    instanceId: "current",
+    started: "2026-08-13T12:00:00.000Z",
+  };
+  expect(
+    ownerStatus(
+      {
+        id: "session-a",
+        label: "A",
+        sessionId: "session-a",
+        pid: 42,
+        instanceId: "current",
+      },
+      [registration],
+    ),
+  ).toBe("live");
+  expect(
+    ownerStatus(
+      {
+        id: "session-a",
+        label: "A",
+        sessionId: "session-a",
+        pid: 42,
+        instanceId: "previous",
+      },
+      [registration],
+    ),
+  ).toBe("offline");
 });
 
 test("legacy PID-only owners become offline after exit or PID recycling", () => {
@@ -125,6 +201,18 @@ test("coordination conditions preserve the different resource lifecycles", () =>
   );
   expect(entries.find((entry) => entry.kind === "work")?.condition).toBe(
     "source-missing",
+  );
+
+  mkdirSync(join(notebook, "experiments", "EXP-001-scratch"));
+  writeFileSync(join(notebook, "experiments", "EXP-001-notes.txt"), "");
+  entries = listCoordination({
+    project,
+    registrations: [],
+    claimStore,
+    workStore,
+  });
+  expect(entries.find((entry) => entry.id === experiment.id)?.condition).toBe(
+    "awaiting-materialization",
   );
 
   writeFileSync(join(notebook, "experiments", "EXP-001-pilot.md"), "");

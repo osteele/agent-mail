@@ -150,6 +150,8 @@ test("claim-path groups repeated path flags under one claim id", async () => {
         "one.swift",
         "--path",
         "two.swift",
+        "--owner",
+        "operator",
       ],
       { env, stdout: "pipe", stderr: "pipe" },
     );
@@ -186,6 +188,47 @@ test("claim-path groups repeated path flags under one claim id", async () => {
     expect(await release.exited).toBe(0);
   } finally {
     rmSync(root, { recursive: true });
+  }
+});
+
+test("unregistered coordination acquisition requires a manual owner label", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-cli-owner-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  mkdirSync(home);
+  mkdirSync(project);
+  const cli = join(import.meta.dir, "cli.ts");
+  const {
+    CLAUDE_CODE_SESSION_ID: _claude,
+    CODEX_THREAD_ID: _codex,
+    ...base
+  } = process.env;
+  const child = Bun.spawn(
+    [
+      process.execPath,
+      cli,
+      "work",
+      "acquire",
+      "--project",
+      project,
+      "--type",
+      "task",
+      "--key",
+      "one",
+    ],
+    {
+      env: { ...base, HOME: home },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  try {
+    expect(await child.exited).not.toBe(0);
+    expect(await new Response(child.stderr).text()).toContain(
+      "requires --owner <label>",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

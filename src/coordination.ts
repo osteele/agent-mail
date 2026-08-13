@@ -12,9 +12,10 @@ import {
 import { displayName } from "./paths.ts";
 import {
   type ProcessInfo,
+  type ProcessScan,
   type Registration,
   listLive,
-  processInfo,
+  scanProcesses,
 } from "./registry.ts";
 import {
   type WorkLease,
@@ -58,20 +59,39 @@ export function ownerStatus(
   owner: ClaimOwner | WorkOwner,
   registrations: Registration[],
   createdAt?: string,
-  processes?: Map<number, ProcessInfo>,
+  processEvidence?: Map<number, ProcessInfo> | ProcessScan,
 ): OwnerStatus {
   if (owner.sessionId && owner.pid !== undefined) {
-    return registrations.some(
+    const registration = registrations.find(
       (registration) =>
         registration.sessionId === owner.sessionId &&
         registration.pid === owner.pid,
-    )
-      ? "live"
-      : "offline";
+    );
+    if (!registration) return "offline";
+    if (owner.instanceId) {
+      return registration.instanceId === owner.instanceId ? "live" : "offline";
+    }
+    if (owner.procStart) {
+      return registration.procStart === owner.procStart ? "live" : "offline";
+    }
+    if (createdAt) {
+      const registeredAt = Date.parse(registration.started);
+      const recordCreatedAt = Date.parse(createdAt);
+      if (!Number.isFinite(registeredAt) || !Number.isFinite(recordCreatedAt)) {
+        return "manual";
+      }
+      if (registeredAt > recordCreatedAt) return "offline";
+    }
+    return "live";
   }
   if (owner.pid === undefined) return "manual";
 
-  const info = (processes ?? processInfo([owner.pid])).get(owner.pid);
+  const scan =
+    processEvidence instanceof Map
+      ? { processes: processEvidence, reliable: true }
+      : (processEvidence ?? scanProcesses([owner.pid]));
+  if (!scan.reliable) return "manual";
+  const info = scan.processes.get(owner.pid);
   if (!info) return "offline";
   if (owner.procStart) {
     return owner.procStart === info.start ? "live" : "offline";
@@ -97,7 +117,9 @@ function ownerRegistration(
   return registrations.find(
     (registration) =>
       registration.sessionId === owner.sessionId &&
-      registration.pid === owner.pid,
+      registration.pid === owner.pid &&
+      (!owner.instanceId || registration.instanceId === owner.instanceId) &&
+      (!owner.procStart || registration.procStart === owner.procStart),
   );
 }
 
@@ -106,19 +128,21 @@ function experimentFiles(
 ): string[] {
   const experiments = join(claim.notebook, "experiments");
   if (!existsSync(experiments)) return [];
-  return readdirSync(experiments)
+  return readdirSync(experiments, { withFileTypes: true })
     .filter(
-      (name) =>
-        name === `${claim.experimentId}.md` ||
-        name.startsWith(`${claim.experimentId}-`),
+      (entry) =>
+        entry.isFile() &&
+        (entry.name === `${claim.experimentId}.md` ||
+          (entry.name.startsWith(`${claim.experimentId}-`) &&
+            entry.name.endsWith(".md"))),
     )
-    .map((name) => join(experiments, name));
+    .map((entry) => join(experiments, entry.name));
 }
 
 function claimEntry(
   claim: Claim,
   registrations: Registration[],
-  processes: Map<number, ProcessInfo>,
+  processes: ProcessScan,
 ): CoordinationEntry {
   const status = ownerStatus(
     claim.owner,
@@ -126,7 +150,10 @@ function claimEntry(
     claim.createdAt,
     processes,
   );
-  const registration = ownerRegistration(claim.owner, registrations);
+  const registration =
+    status === "offline"
+      ? undefined
+      : ownerRegistration(claim.owner, registrations);
   const ownerActivity = {
     ...(registration?.lastSeen ? { ownerLastSeen: registration.lastSeen } : {}),
     ...(registration?.started ? { ownerStartedAt: registration.started } : {}),
@@ -186,7 +213,7 @@ function claimEntry(
 function workEntry(
   lease: WorkLease,
   registrations: Registration[],
-  processes: Map<number, ProcessInfo>,
+  processes: ProcessScan,
 ): CoordinationEntry {
   const status = ownerStatus(
     lease.owner,
@@ -194,7 +221,10 @@ function workEntry(
     lease.createdAt,
     processes,
   );
-  const registration = ownerRegistration(lease.owner, registrations);
+  const registration =
+    status === "offline"
+      ? undefined
+      : ownerRegistration(lease.owner, registrations);
   const sources = lease.resource.sourcePath ? [lease.resource.sourcePath] : [];
   return {
     id: lease.id,
@@ -246,14 +276,14 @@ export function listCoordination(
     : options.project
       ? workStore.list(options.project)
       : [];
-  const processes =
-    options.processes ??
-    processInfo(
-      [...workRecords, ...claimRecords]
-        .map((record) => record.owner)
-        .filter((owner) => !owner.sessionId && owner.pid !== undefined)
-        .map((owner) => owner.pid as number),
-    );
+  const processes = options.processes
+    ? { processes: options.processes, reliable: true }
+    : scanProcesses(
+        [...workRecords, ...claimRecords]
+          .map((record) => record.owner)
+          .filter((owner) => !owner.sessionId && owner.pid !== undefined)
+          .map((owner) => owner.pid as number),
+      );
   return [
     ...workRecords.map((lease) => workEntry(lease, registrations, processes)),
     ...claimRecords.map((claim) => claimEntry(claim, registrations, processes)),

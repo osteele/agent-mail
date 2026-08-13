@@ -147,6 +147,13 @@ test("logical work can be acquired, updated, listed, and released over MCP", asy
     expect(acquiredText).toContain("Pilot campaign");
     const workId = /acquired ([0-9a-f-]+)/.exec(acquiredText)?.[1];
     expect(workId).toBeDefined();
+    const workRoot = join(home, ".claude", "agent-mail", "work");
+    const [workProject] = readdirSync(workRoot);
+    const [workFile] = readdirSync(join(workRoot, workProject));
+    const stored = JSON.parse(
+      readFileSync(join(workRoot, workProject, workFile), "utf8"),
+    ) as { owner: { instanceId?: string; procStart?: string } };
+    expect(stored.owner.instanceId).toBeDefined();
 
     const updated = await client.callTool({
       name: "update_work",
