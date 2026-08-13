@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -62,6 +68,61 @@ test("status-line prints nothing and exits 0 when the session is alone", async (
     expect(await new Response(child.stdout).text()).toBe("");
   } finally {
     rmSync(project, { recursive: true });
+  }
+});
+
+test("listeners --no-sync emits snapshot JSON without pruning registry", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-listeners-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const data = join(home, ".claude", "agent-mail");
+  const registry = join(data, "registry");
+  mkdirSync(project, { recursive: true });
+  mkdirSync(registry, { recursive: true });
+  const untouched = join(registry, "invalid.json");
+  writeFileSync(untouched, "not a registration");
+  writeFileSync(
+    join(data, "presence.json"),
+    JSON.stringify({
+      version: 1,
+      generatedAt: Date.now(),
+      generatedBy: process.pid,
+      sessions: [
+        {
+          cwd: project,
+          pid: process.pid,
+          sessionId: "poller",
+          capabilities: { inboxPoll: true, channelPush: false },
+          lastInboxPoll: "2026-08-12T12:00:00.000Z",
+          started: "2026-08-12T11:00:00.000Z",
+        },
+      ],
+    }),
+  );
+  const cli = join(import.meta.dir, "cli.ts");
+  try {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        cli,
+        "listeners",
+        "--project",
+        project,
+        "--no-sync",
+        "--json",
+      ],
+      { env: { ...process.env, HOME: home }, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await child.exited).toBe(0);
+    const report = JSON.parse(
+      await new Response(child.stdout).text(),
+    ) as Record<string, unknown>;
+    expect(report.source).toBe("presence-snapshot");
+    expect(report.fresh).toBe(true);
+    expect(report.sessions).toHaveLength(1);
+    expect(existsSync(untouched)).toBe(true);
+  } finally {
+    rmSync(root, { recursive: true });
   }
 });
 

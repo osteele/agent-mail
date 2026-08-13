@@ -465,7 +465,8 @@ agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to 
 agent-mail inbox [--project <dir>] [--limit N] [--unread]
 agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
 agent-mail receipts [--project <dir>] [--id <message-id>] [--limit N]
-agent-mail listeners                  # attached sessions + idle times
+agent-mail listeners [--project <dir>] [--json] [--no-sync]
+                                      # attached sessions + idle times
 agent-mail status-line [--project <dir>] [--session <id>] [--debug]  # see below
 agent-mail mute|unmute (--session <name-or-id> | --project <dir>)  # pause/resume push
 agent-mail inbound --policy accept|hold|refuse \
@@ -571,6 +572,27 @@ latency-sensitive readers skip the process scan. It is a presentation cache
 with a 30-second TTL, never a routing input.
 `send_mail`, `list_sessions`, and both dashboards keep reading the registry
 directly. That tick is also what prunes registrations whose process has exited.
+
+Automation should use
+`agent-mail listeners --project <dir> --no-sync --json`, not read the snapshot
+file directly. The command returns a versioned JSON object with `source`,
+`fresh`, `generatedAt`, and raw `sessions` (including `sessionId`, `cwd`,
+`client`, `capabilities`, `inboundPolicy`, `muted`, `lastSeen`,
+`lastInboxPoll`, and `started`).
+`--no-sync` never scans processes, prunes registry entries, or falls back to a
+different source. If the daemon snapshot is missing, malformed, or older than
+30 seconds, it returns `fresh: false` with an empty `sessions` array. This mode
+is suitable for conservative advisory routing; it is not proof of delivery or
+attention.
+
+For poll-only sessions, `lastSeen` means only that some agent-mail tool ran; it
+does not imply that the inbox was checked. `lastInboxPoll` is stamped only by
+`check_inbox`, including an empty check, so automation can distinguish recent
+polling from unrelated activity. It still predicts only that the session may
+poll again. For a message already sent, `agent-mail receipts --id <message-id>`
+distinguishes `pushed` (channel delivery or an inbox pull) from `read` (an
+explicit mark-read); neither status proves that the recipient completed the
+requested work.
 
 ## Configuration
 

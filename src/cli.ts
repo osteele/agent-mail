@@ -5,7 +5,7 @@
  *   agent-mail notify --project <dir> --message <text> [--from <label>] [--no-slack]
  *   agent-mail inbox [--project <dir>] [--limit N] [--unread]
  *   agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
- *   agent-mail listeners
+ *   agent-mail listeners [--project <dir>] [--json] [--no-sync]
  *   agent-mail mute|unmute (--session <name-or-id> | --project <dir>)
  *   agent-mail claim-experiment [--project <dir>] [--notebook <dir>]
  *   agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>]
@@ -73,7 +73,11 @@ import {
   displayName,
   ensureDirs,
 } from "./paths.ts";
-import { liveInProject, statusLineName } from "./presence.ts";
+import {
+  liveInProject,
+  readListenerSnapshot,
+  statusLineName,
+} from "./presence.ts";
 import {
   type InboundPolicy,
   type Registration,
@@ -538,8 +542,42 @@ function cmdReceipts(flags: Record<string, string | boolean>): void {
   }
 }
 
-function cmdListeners(): void {
-  const live = listLive();
+function cmdListeners(flags: Record<string, string | boolean>): void {
+  const project =
+    typeof flags.project === "string"
+      ? flags["no-sync"] === true
+        ? canonicalProject(flags.project)
+        : resolveProjectArg(flags.project)
+      : undefined;
+  const snapshot =
+    flags["no-sync"] === true ? readListenerSnapshot(project) : undefined;
+  const live = snapshot
+    ? snapshot.sessions
+    : listLive().filter(
+        (registration) =>
+          project === undefined ||
+          canonicalProject(registration.cwd) === project,
+      );
+  if (flags.json === true) {
+    console.log(
+      JSON.stringify(
+        snapshot ?? {
+          version: 1,
+          source: "live-registry",
+          fresh: true,
+          generatedAt: Date.now(),
+          sessions: live,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  if (snapshot && !snapshot.fresh) {
+    console.log("no fresh presence snapshot; no sessions reported");
+    return;
+  }
   if (live.length === 0) {
     console.log("no sessions listening");
     return;
@@ -1353,7 +1391,9 @@ Messaging:
                         Mark messages read
   receipts [--project <dir>] [--id <message-id>] [--limit N]
                         Show append-only delivery state changes
-  listeners             List live sessions
+  listeners [--project <dir>] [--json] [--no-sync]
+                        List sessions. --no-sync reads only the daemon's fresh
+                        snapshot and never scans or prunes the registry.
   mute | unmute (--session <name-or-id> | --project <dir>)
                         Pause / resume channel push for matching sessions
   inbound --policy accept|hold|refuse (--session <name-or-id> | --project <dir>)
@@ -1434,7 +1474,7 @@ switch (cmd) {
     cmdReceipts(flags);
     break;
   case "listeners":
-    cmdListeners();
+    cmdListeners(flags);
     break;
   case "status-line":
     await cmdStatusLine(flags);

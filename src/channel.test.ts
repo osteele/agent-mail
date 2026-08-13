@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -69,6 +71,17 @@ test("claim_path accepts and releases an atomic path batch over MCP", async () =
     const tools = await client.listTools();
     const claimTool = tools.tools.find((tool) => tool.name === "claim_path");
     expect(claimTool?.inputSchema.properties).toHaveProperty("paths");
+
+    await client.callTool({ name: "check_inbox" });
+    const registry = join(home, ".claude", "agent-mail", "registry");
+    const registrations = readdirSync(registry).map(
+      (name) =>
+        JSON.parse(readFileSync(join(registry, name), "utf8")) as {
+          lastInboxPoll?: string;
+        },
+    );
+    expect(registrations).toHaveLength(1);
+    expect(registrations[0].lastInboxPoll).toBeDefined();
 
     const claimed = await client.callTool({
       name: "claim_path",

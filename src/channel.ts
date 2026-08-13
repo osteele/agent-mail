@@ -57,6 +57,7 @@ import {
   setInboundPolicy,
   setMuted,
   touch,
+  touchInboxPoll,
   unregister,
 } from "./registry.ts";
 import {
@@ -764,6 +765,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     };
   }
   if (req.params.name === "check_inbox") {
+    touchInboxPoll(cwd, process.pid);
     const { limit, unread } = (req.params.arguments ?? {}) as {
       limit?: number;
       unread?: boolean;

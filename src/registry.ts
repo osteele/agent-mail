@@ -34,6 +34,7 @@ export interface Registration {
   muted?: boolean; // channel push paused; messages still spool and flush on unmute
   inboundPolicy?: InboundPolicy;
   lastSeen?: string; // ISO 8601; stamped on each tool call the session makes
+  lastInboxPoll?: string; // ISO 8601; check_inbox specifically, not generic activity
   started: string; // ISO 8601
 }
 
@@ -165,6 +166,7 @@ export function register(
   let started = new Date().toISOString();
   let muted: boolean | undefined;
   let lastSeen: string | undefined;
+  let lastInboxPoll: string | undefined;
   let procStart: string | undefined;
   let inboundPolicy = defaultInboundPolicy;
   if (existsSync(path)) {
@@ -173,6 +175,9 @@ export function register(
       if (typeof prev.started === "string") started = prev.started;
       if (typeof prev.muted === "boolean") muted = prev.muted;
       if (typeof prev.lastSeen === "string") lastSeen = prev.lastSeen;
+      if (typeof prev.lastInboxPoll === "string") {
+        lastInboxPoll = prev.lastInboxPoll;
+      }
       if (typeof prev.procStart === "string") procStart = prev.procStart;
       if (
         prev.inboundPolicy === "accept" ||
@@ -197,6 +202,7 @@ export function register(
     ...(muted !== undefined ? { muted } : {}),
     inboundPolicy,
     ...(lastSeen ? { lastSeen } : {}),
+    ...(lastInboxPoll ? { lastInboxPoll } : {}),
     started,
   };
   writeFileSync(path, JSON.stringify(entry, null, 1));
@@ -277,6 +283,24 @@ export function touch(cwd: string, pid: number): void {
     return;
   }
   entry.lastSeen = new Date().toISOString();
+  writeFileSync(path, JSON.stringify(entry, null, 1));
+}
+
+/** Stamp an explicit inbox check separately from generic MCP activity.
+ * Poll-only clients cannot receive an alert, so recent `lastSeen` is not
+ * evidence that they will discover newly spooled mail. */
+export function touchInboxPoll(cwd: string, pid: number): void {
+  const path = entryPath(cwd, pid);
+  if (!existsSync(path)) return;
+  let entry: Registration;
+  try {
+    entry = JSON.parse(readFileSync(path, "utf8")) as Registration;
+  } catch {
+    return;
+  }
+  const now = new Date().toISOString();
+  entry.lastSeen = now;
+  entry.lastInboxPoll = now;
   writeFileSync(path, JSON.stringify(entry, null, 1));
 }
 
