@@ -3,11 +3,15 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { projectSlug } from "./paths.ts";
+import { processInfo } from "./registry.ts";
 
 test("notify --no-slack suppresses only that message's Slack echo", async () => {
   const requests: Record<string, unknown>[] = [];
@@ -240,6 +244,68 @@ test("work CLI lists logical ownership across projects", async () => {
       { env, stdout: "pipe", stderr: "pipe" },
     );
     expect(await release.exited).toBe(0);
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});
+
+test("work CLI attaches ownership to its registered Codex session", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-cli-session-work-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const state = join(home, ".claude", "agent-mail");
+  const registry = join(state, "registry");
+  mkdirSync(project, { recursive: true });
+  mkdirSync(registry, { recursive: true });
+  const procStart = processInfo([process.pid]).get(process.pid)?.start;
+  expect(procStart).toBeTruthy();
+  writeFileSync(
+    join(registry, `${projectSlug(project)}-${process.pid}.json`),
+    JSON.stringify({
+      cwd: project,
+      pid: process.pid,
+      procStart,
+      sessionId: "codex-session",
+      client: "codex",
+      started: new Date().toISOString(),
+    }),
+  );
+  const cli = join(import.meta.dir, "cli.ts");
+  const { CLAUDE_CODE_SESSION_ID: _claudeSessionId, ...baseEnv } = process.env;
+  const env = {
+    ...baseEnv,
+    HOME: home,
+    CODEX_THREAD_ID: "codex-session",
+  };
+  try {
+    const acquire = Bun.spawn(
+      [
+        process.execPath,
+        cli,
+        "work",
+        "acquire",
+        "--project",
+        project,
+        "--type",
+        "research-plan",
+        "--key",
+        "session-plan",
+      ],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await acquire.exited).toBe(0);
+    const workDir = join(state, "work", projectSlug(project));
+    const files = readdirSync(workDir);
+    expect(files).toHaveLength(1);
+    const lease = JSON.parse(readFileSync(join(workDir, files[0]), "utf8")) as {
+      owner: Record<string, unknown>;
+    };
+    expect(lease.owner).toMatchObject({
+      id: "codex-session",
+      sessionId: "codex-session",
+      pid: process.pid,
+      procStart,
+    });
   } finally {
     rmSync(root, { recursive: true });
   }

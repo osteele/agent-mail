@@ -150,11 +150,12 @@ generated session identity has two forms:
 Pass a session's full name, display name, or session ID as `session` to reach it
 specifically. Use `list_sessions` to discover these values. A display name is
 matched without regard to case and must be unambiguous in the target project.
-Claude Code supplies its ID in `CLAUDE_CODE_SESSION_ID`. Codex receives a
-generated ID when its MCP server starts. A deliberate Claude `/rename` is
-preserved verbatim as both forms. Existing sessions retain their previously
-assigned syllable names, such as full name `augur-hia` and display name `hia`.
-Only new session IDs receive adjective–noun names.
+Claude Code supplies its ID in `CLAUDE_CODE_SESSION_ID`; current Codex supplies
+`CODEX_THREAD_ID`. Older hosts that expose neither receive a generated ID when
+their MCP server starts. A deliberate Claude `/rename` is preserved verbatim as
+both forms. Existing sessions retain their previously assigned syllable names,
+such as full name `augur-hia` and display name `hia`. Only new session IDs
+receive adjective–noun names.
 
 The project spool stores every message for that directory. Session-local views
 (`check_inbox`, `mark_read`, and channel push) filter it for the current
@@ -301,6 +302,12 @@ conflict; a definitively dead session can be displaced on the next acquisition.
 `update_work` records a concise `working` or `waiting` state and current
 activity. `release_work` relinquishes responsibility.
 
+Coordination CLI commands run from a registered Claude Code or Codex shell use
+that host's session identity, so their leases and claims have the same liveness
+and shutdown behavior as MCP tool calls. CLI commands outside a registered
+agent session create deliberately durable manual ownership. Give those records
+an `--owner` label and release them explicitly when the operator's work ends.
+
 `list_work` defaults to the current project. Pass `all_projects: true` for a
 cross-project view, or filter by resource type or owner. `list_sessions` also
 shows each session's leased work. MCP-session leases are released on normal
@@ -315,7 +322,8 @@ The current path is optional provenance, not identity.
 `list_coordination` combines work leases, path claims, and experiment-number
 reservations in one project or cross-project view. Each record has a condition:
 
-- `healthy` — its session owner is live, or it has a manual owner.
+- `healthy` — its session owner is live, or it has a deliberately durable
+  manual owner. The listing reports the owner status separately.
 - `owner-offline` — the recorded session and process identity is definitively
   dead; the record is eligible for agent recovery.
 - `source-missing` — a work lease's optional source path is absent.
@@ -333,6 +341,13 @@ recovering an experiment reservation whose file is absent, inspect jobs and
 artifacts that may already use its ID. Normal owner release remains
 `release_claim` or `release_work`; an operator can still use the CLI release
 commands for an exceptional manual override.
+
+Listings show the owner ID, session/PID identity, owner status, and the
+session's last tool-call heartbeat when one exists. The lease `updated` time is
+separate: it changes only on `acquire_work` or `update_work`. Legacy CLI records
+that contain a PID but no session ID are process-owned rather than manual;
+agent-mail uses process start time to reject a recycled PID and makes the record
+recoverable once the original process is gone.
 
 CLI equivalents support inspection, manual ownership, and recovery:
 

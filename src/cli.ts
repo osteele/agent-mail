@@ -103,12 +103,7 @@ import {
   readMessages,
   readReceipts,
 } from "./spool.ts";
-import {
-  type WorkLease,
-  type WorkOwner,
-  type WorkState,
-  work,
-} from "./work.ts";
+import { type WorkLease, type WorkState, work } from "./work.ts";
 
 function capabilityTag(r: Registration): string {
   const capabilities = r.capabilities;
@@ -678,15 +673,39 @@ function claimProject(flags: Record<string, string | boolean>): string {
     : canonicalProject(process.cwd());
 }
 
-function cliOwner(flags: Record<string, string | boolean>): ClaimOwner {
+function cliOwner(
+  flags: Record<string, string | boolean>,
+  project: string,
+): ClaimOwner {
   const label = typeof flags.owner === "string" ? flags.owner : "cli";
+  const sessionId =
+    process.env.CLAUDE_CODE_SESSION_ID ?? process.env.CODEX_THREAD_ID;
+  if (sessionId) {
+    const registration = listLive().find(
+      (entry) =>
+        entry.sessionId === sessionId &&
+        canonicalProject(entry.cwd) === canonicalProject(project),
+    );
+    if (registration) {
+      const identity = sessionNames(
+        sessionId,
+        claudeSessions().get(sessionId),
+        registration.cwd,
+      );
+      return {
+        id: sessionId,
+        label: typeof flags.owner === "string" ? label : identity.displayName,
+        sessionId,
+        pid: registration.pid,
+        ...(registration.procStart
+          ? { procStart: registration.procStart }
+          : {}),
+      };
+    }
+  }
   return {
-    id:
-      typeof flags.owner === "string"
-        ? `cli:${flags.owner}`
-        : `cli:${process.pid}`,
+    id: typeof flags.owner === "string" ? `cli:${flags.owner}` : "cli",
     label,
-    pid: process.pid,
   };
 }
 
@@ -708,7 +727,11 @@ function cmdClaimExperiment(flags: Record<string, string | boolean>): void {
       : existsSync(join(project, "lab-notebook"))
         ? join(project, "lab-notebook")
         : project;
-  const claim = claims.claimExperiment(project, notebook, cliOwner(flags));
+  const claim = claims.claimExperiment(
+    project,
+    notebook,
+    cliOwner(flags, project),
+  );
   console.log(`${claim.experimentId} ${claim.id}`);
 }
 
@@ -729,10 +752,10 @@ function cmdClaimPath(
   const claim = claims.claimPaths(
     project,
     paths.map((path) => ({ path: resolve(project, path), pathType })),
-    cliOwner(flags),
+    cliOwner(flags, project),
     {
-      ownerIsLive: (owner) =>
-        coordinationOwnerStatus(owner, live) !== "offline",
+      ownerIsLive: (owner, claim) =>
+        coordinationOwnerStatus(owner, live, claim.createdAt) !== "offline",
     },
   );
   console.log(`${claim.id}`);
@@ -818,23 +841,15 @@ function parseWorkState(
   throw new Error("work state must be working or waiting");
 }
 
-function workOwnerIsLive(owner: WorkOwner, live = listLive()): boolean {
-  if (!owner.sessionId || owner.pid === undefined) return true;
-  return live.some(
-    (registration) =>
-      registration.sessionId === owner.sessionId &&
-      registration.pid === owner.pid,
-  );
-}
-
 function describeWork(lease: WorkLease, live = listLive()): string {
   const label = lease.resource.label
     ? `${lease.resource.label} (${lease.resource.type}:${lease.resource.key})`
     : `${lease.resource.type}:${lease.resource.key}`;
   const activity = lease.activity ? ` — ${lease.activity}` : "";
-  const ownerStatus = workOwnerIsLive(lease.owner, live)
-    ? ""
-    : " [owner offline]";
+  const ownerStatus =
+    coordinationOwnerStatus(lease.owner, live, lease.createdAt) !== "offline"
+      ? ""
+      : " [owner offline]";
   return `${lease.id} ${displayName(lease.project)}/${label} — ${lease.owner.label} [${lease.state}]${activity} [updated ${lease.updatedAt}]${ownerStatus}`;
 }
 
@@ -876,7 +891,7 @@ function cmdWork(
       );
     }
     const project = claimProject(flags);
-    const owner = cliOwner(flags);
+    const owner = cliOwner(flags, project);
     const live = listLive();
     const lease = work.acquire(
       project,
@@ -893,7 +908,9 @@ function cmdWork(
         state: parseWorkState(flags.state),
         activity:
           typeof flags.activity === "string" ? flags.activity : undefined,
-        ownerIsLive: (candidate) => workOwnerIsLive(candidate, live),
+        ownerIsLive: (candidate, existing) =>
+          coordinationOwnerStatus(candidate, live, existing.createdAt) !==
+          "offline",
       },
     );
     console.log(describeWork(lease, live));

@@ -96,7 +96,7 @@ const PS_LOOP_MAX = 12;
  *
  * `ps` exits nonzero when a listed pid is gone but still reports the live ones,
  * so the exit status is ignored. */
-function processInfo(pids: number[]): Map<number, ProcessInfo> {
+export function processInfo(pids: number[]): Map<number, ProcessInfo> {
   const map = new Map<number, ProcessInfo>();
   const wanted = new Set(pids);
   if (wanted.size === 0) return map;

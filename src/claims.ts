@@ -21,6 +21,7 @@ export interface ClaimOwner {
   label: string;
   sessionId?: string;
   pid?: number;
+  procStart?: string;
 }
 
 interface ClaimBase {
@@ -231,7 +232,9 @@ export class ClaimStore {
     target: string,
     pathType: PathClaimTarget["pathType"],
     owner: ClaimOwner,
-    options: { ownerIsLive?: (owner: ClaimOwner) => boolean } = {},
+    options: {
+      ownerIsLive?: (owner: ClaimOwner, claim: Claim) => boolean;
+    } = {},
   ): PathClaim {
     return this.claimPaths(
       project,
@@ -248,7 +251,9 @@ export class ClaimStore {
     project: string,
     targets: PathClaimTarget[],
     owner: ClaimOwner,
-    options: { ownerIsLive?: (owner: ClaimOwner) => boolean } = {},
+    options: {
+      ownerIsLive?: (owner: ClaimOwner, claim: Claim) => boolean;
+    } = {},
   ): PathClaim {
     if (targets.length === 0) {
       throw new Error("at least one claim path is required");
@@ -295,7 +300,7 @@ export class ClaimStore {
           }
         }
         if (!conflictingPath) continue;
-        if (!options.ownerIsLive || options.ownerIsLive(claim.owner)) {
+        if (!options.ownerIsLive || options.ownerIsLive(claim.owner, claim)) {
           throw new ClaimConflictError(claim, conflictingPath);
         }
         // A grouped claim is one ownership transaction. If its process is
@@ -384,13 +389,13 @@ export class ClaimStore {
   recover(
     project: string,
     claimId: string,
-    ownerIsLive: (owner: ClaimOwner) => boolean,
+    ownerIsLive: (owner: ClaimOwner, claim: Claim) => boolean,
   ): Claim {
     const canonical = canonicalProject(project);
     return this.withLock(canonical, () => {
       const claim = this.list(canonical).find((item) => item.id === claimId);
       if (!claim) throw new Error(`claim not found: ${claimId}`);
-      if (ownerIsLive(claim.owner)) {
+      if (ownerIsLive(claim.owner, claim)) {
         throw new Error(
           `claim ${claimId} belongs to ${claim.owner.label}; its owner is live or cannot be verified offline`,
         );

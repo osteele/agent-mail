@@ -21,6 +21,7 @@ export interface WorkOwner {
   label: string;
   sessionId?: string;
   pid?: number;
+  procStart?: string;
 }
 
 export interface WorkResource {
@@ -216,7 +217,7 @@ export class WorkStore {
     options: {
       state?: WorkState;
       activity?: string;
-      ownerIsLive?: (owner: WorkOwner) => boolean;
+      ownerIsLive?: (owner: WorkOwner, lease: WorkLease) => boolean;
     } = {},
   ): WorkLease {
     const canonical = canonicalProject(project);
@@ -257,7 +258,10 @@ export class WorkStore {
         return updated;
       }
       if (existing) {
-        if (!options.ownerIsLive || options.ownerIsLive(existing.owner)) {
+        if (
+          !options.ownerIsLive ||
+          options.ownerIsLive(existing.owner, existing)
+        ) {
           throw new WorkConflictError(existing);
         }
         unlinkSync(join(this.projectDir(canonical), `${existing.id}.json`));
@@ -324,13 +328,13 @@ export class WorkStore {
   recover(
     project: string,
     leaseId: string,
-    ownerIsLive: (owner: WorkOwner) => boolean,
+    ownerIsLive: (owner: WorkOwner, lease: WorkLease) => boolean,
   ): WorkLease {
     const canonical = canonicalProject(project);
     return this.withLock(canonical, () => {
       const lease = this.list(canonical).find((item) => item.id === leaseId);
       if (!lease) throw new Error(`work lease not found: ${leaseId}`);
-      if (ownerIsLive(lease.owner)) {
+      if (ownerIsLive(lease.owner, lease)) {
         throw new Error(
           `work lease ${leaseId} belongs to ${lease.owner.label}; its owner is live or cannot be verified offline`,
         );

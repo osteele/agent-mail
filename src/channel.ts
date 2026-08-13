@@ -9,8 +9,8 @@
  *   channels research preview; Codex has no channel push, but the tools work.)
  * - Registers {cwd, pid, sessionId, name, client} in the registry so peers and
  *   the daemon can see which sessions are listening. sessionId comes from
- *   CLAUDE_CODE_SESSION_ID (Codex sets no session env var, so it falls back to a
- *   per-process random uuid); name from Claude Code's session metadata; client
+ *   CLAUDE_CODE_SESSION_ID or CODEX_THREAD_ID (with a per-process random uuid
+ *   fallback); name from Claude Code's session metadata; client
  *   ("claude-code"/"codex") from the MCP clientInfo once the handshake lands.
  * - Tools: send_mail, list_sessions, check_inbox, mark_read, and
  *   mute_notifications / unmute_notifications (pause/resume this session's
@@ -89,11 +89,15 @@ import {
 
 const cwd = canonicalProject(process.cwd());
 // Per-session identifier. Claude Code sets CLAUDE_CODE_SESSION_ID in the MCP
-// server's environment (correlates to the transcript filename and `--resume`);
-// fall back to a constructed id for older Claude Code versions that don't.
+// server's environment (correlates to the transcript filename and `--resume`),
+// while current Codex exposes CODEX_THREAD_ID. Fall back to a constructed id
+// for older hosts that expose neither.
 // Used to distinguish multiple sessions in the same directory (which share one
 // spool) and to suppress self-echo of our own outgoing mail.
-const sessionId = process.env.CLAUDE_CODE_SESSION_ID ?? randomUUID();
+const sessionId =
+  process.env.CLAUDE_CODE_SESSION_ID ??
+  process.env.CODEX_THREAD_ID ??
+  randomUUID();
 const myMeta = claudeSessions().get(sessionId);
 const myName = myMeta?.name; // raw Claude name for the registry snapshot
 const mySessionNames = sessionNames(sessionId, myMeta, cwd);
@@ -583,7 +587,7 @@ function describeClaim(claim: Claim, registrations = listLive()): string {
       : pathClaimTargets(claim)
           .map((target) => `${target.pathType} ${target.path}`)
           .join(", ");
-  const status = ownerStatus(claim.owner, registrations);
+  const status = ownerStatus(claim.owner, registrations, claim.createdAt);
   const suffix = status === "live" ? "" : ` [owner ${status}]`;
   return `${claim.id} ${resource} — ${claim.owner.label} [${claim.createdAt}]${suffix}`;
 }
@@ -591,13 +595,9 @@ function describeClaim(claim: Claim, registrations = listLive()): string {
 function workOwnerIsLive(
   owner: WorkOwner,
   registrations = listLive(),
+  createdAt?: string,
 ): boolean {
-  if (!owner.sessionId || owner.pid === undefined) return true;
-  return registrations.some(
-    (registration) =>
-      registration.sessionId === owner.sessionId &&
-      registration.pid === owner.pid,
-  );
+  return ownerStatus(owner, registrations, createdAt) !== "offline";
 }
 
 function describeWork(lease: WorkLease, registrations = listLive()): string {
@@ -605,7 +605,7 @@ function describeWork(lease: WorkLease, registrations = listLive()): string {
     ? `${lease.resource.label} (${lease.resource.type}:${lease.resource.key})`
     : `${lease.resource.type}:${lease.resource.key}`;
   const activity = lease.activity ? ` — ${lease.activity}` : "";
-  const orphaned = workOwnerIsLive(lease.owner, registrations)
+  const orphaned = workOwnerIsLive(lease.owner, registrations, lease.createdAt)
     ? ""
     : " [owner offline]";
   return `${lease.id} ${displayName(lease.project)}/${label} — ${lease.owner.label} [${lease.state}]${activity} [updated ${lease.updatedAt}]${orphaned}`;
@@ -974,7 +974,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       })),
       claimOwner,
       {
-        ownerIsLive: (owner) => ownerStatus(owner, live) !== "offline",
+        ownerIsLive: (owner, claim) =>
+          ownerStatus(owner, live, claim.createdAt) !== "offline",
       },
     );
     const targets = pathClaimTargets(claim);
@@ -1037,7 +1038,8 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       {
         state,
         activity,
-        ownerIsLive: (owner) => workOwnerIsLive(owner, live),
+        ownerIsLive: (owner, lease) =>
+          workOwnerIsLive(owner, live, lease.createdAt),
       },
     );
     return {

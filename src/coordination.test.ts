@@ -39,6 +39,57 @@ test("owner status distinguishes live, offline, and manual owners", () => {
   );
 });
 
+test("legacy PID-only owners become offline after exit or PID recycling", () => {
+  const owner = { id: "cli:42", label: "cli", pid: 42 };
+  const createdAt = "2026-08-13T12:00:00.000Z";
+
+  expect(ownerStatus(owner, [], createdAt, new Map())).toBe("offline");
+  expect(
+    ownerStatus(
+      owner,
+      [],
+      createdAt,
+      new Map([
+        [42, { start: "Thu Aug 13 07:00:00 2020", command: "agent-mail" }],
+      ]),
+    ),
+  ).toBe("live");
+  expect(
+    ownerStatus(
+      owner,
+      [],
+      createdAt,
+      new Map([
+        [42, { start: "Thu Aug 13 07:00:00 2030", command: "unrelated" }],
+      ]),
+    ),
+  ).toBe("offline");
+});
+
+test("coordination makes dead legacy CLI work recoverable", () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-coordination-cli-"));
+  temporaryDirectories.push(root);
+  const project = join(root, "project");
+  mkdirSync(project);
+  const workStore = new WorkStore(join(root, "work"));
+  workStore.acquire(
+    project,
+    { type: "research-plan", key: "plan" },
+    { id: "cli:66204", label: "cli", pid: 66204 },
+  );
+
+  const entry = listCoordination({
+    project,
+    registrations: [],
+    processes: new Map(),
+    claimStore: new ClaimStore(join(root, "claims")),
+    workStore,
+  })[0];
+  expect(entry.ownerStatus).toBe("offline");
+  expect(entry.condition).toBe("owner-offline");
+  expect(entry.recoverable).toBe(true);
+});
+
 test("coordination conditions preserve the different resource lifecycles", () => {
   const root = mkdtempSync(join(tmpdir(), "agent-mail-coordination-"));
   temporaryDirectories.push(root);
