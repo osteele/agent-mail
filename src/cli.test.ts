@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -127,6 +128,85 @@ test("listeners --no-sync emits snapshot JSON without pruning registry", async (
     expect(existsSync(untouched)).toBe(true);
   } finally {
     rmSync(root, { recursive: true });
+  }
+});
+
+test("state --no-sync emits versioned aggregate data without pruning", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-state-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const data = join(home, ".claude", "agent-mail");
+  const registry = join(data, "registry");
+  const inbox = join(data, "inbox");
+  mkdirSync(project, { recursive: true });
+  const canonical = realpathSync(project);
+  mkdirSync(registry, { recursive: true });
+  mkdirSync(inbox, { recursive: true });
+  const untouched = join(registry, "invalid.json");
+  writeFileSync(untouched, "not a registration");
+  const now = Date.now();
+  writeFileSync(
+    join(data, "presence.json"),
+    JSON.stringify({
+      version: 1,
+      generatedAt: now,
+      generatedBy: process.pid,
+      sessions: [],
+    }),
+  );
+  writeFileSync(
+    join(data, "processes.json"),
+    JSON.stringify({
+      version: 1,
+      generatedAt: now,
+      generatedBy: process.pid,
+      pids: [],
+      reliable: true,
+      processes: [],
+    }),
+  );
+  writeFileSync(
+    join(inbox, `${projectSlug(project)}.jsonl`),
+    `${JSON.stringify({
+      ts: "2026-08-13T12:00:00.000Z",
+      from: "sender",
+      project: canonical,
+      message: "legacy id",
+    })}\n`,
+  );
+  const cli = join(import.meta.dir, "cli.ts");
+  try {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        cli,
+        "state",
+        "--project",
+        project,
+        "--no-sync",
+        "--json",
+      ],
+      { env: { ...process.env, HOME: home }, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await child.exited).toBe(0);
+    const report = JSON.parse(await new Response(child.stdout).text()) as {
+      schemaVersion: number;
+      source: { mode: string };
+      freshness: { presence: boolean };
+      messages: Array<{ id: string; read: boolean }>;
+    };
+    expect(report.schemaVersion).toBe(1);
+    expect(report.source.mode).toBe("filesystem-snapshot");
+    expect(report.freshness.presence).toBe(true);
+    expect(report.messages).toHaveLength(1);
+    expect(report.messages[0].id).toMatch(/^[0-9a-f]{16}$/);
+    expect(report.messages[0].read).toBe(false);
+    expect(existsSync(untouched)).toBe(true);
+    expect(existsSync(join(data, "claims"))).toBe(false);
+    expect(existsSync(join(data, "work"))).toBe(false);
+    expect(existsSync(join(data, "transfers"))).toBe(false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -289,6 +369,151 @@ test("work CLI lists logical ownership across projects", async () => {
     expect(await release.exited).toBe(0);
   } finally {
     rmSync(root, { recursive: true });
+  }
+});
+
+test("work conflicts explain manual ownership and the recovery path", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-cli-conflict-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  mkdirSync(home);
+  mkdirSync(project);
+  const cli = join(import.meta.dir, "cli.ts");
+  const env = { ...process.env, HOME: home };
+  try {
+    const first = Bun.spawn(
+      [
+        process.execPath,
+        cli,
+        "work",
+        "acquire",
+        "--project",
+        project,
+        "--type",
+        "task",
+        "--key",
+        "one",
+        "--owner",
+        "holder",
+      ],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await first.exited).toBe(0);
+    const second = Bun.spawn(
+      [
+        process.execPath,
+        cli,
+        "work",
+        "acquire",
+        "--project",
+        project,
+        "--type",
+        "task",
+        "--key",
+        "one",
+        "--owner",
+        "requester",
+      ],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await second.exited).not.toBe(0);
+    expect(await new Response(second.stderr).text()).toContain(
+      "owner is deliberately manual",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("work transfer CLI records and accepts an auditable handoff", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-cli-transfer-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  mkdirSync(home);
+  mkdirSync(project);
+  const cli = join(import.meta.dir, "cli.ts");
+  const env = { ...process.env, HOME: home };
+  try {
+    const acquired = Bun.spawn(
+      [
+        process.execPath,
+        cli,
+        "work",
+        "acquire",
+        "--project",
+        project,
+        "--type",
+        "research-plan",
+        "--key",
+        "plan",
+        "--owner",
+        "holder",
+      ],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await acquired.exited).toBe(0);
+    const workId = (await new Response(acquired.stdout).text()).split(" ")[0];
+
+    const requested = Bun.spawn(
+      [
+        process.execPath,
+        cli,
+        "coordination",
+        "request-transfer",
+        "--id",
+        workId,
+        "--owner",
+        "requester",
+        "--timeout",
+        "60",
+      ],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await requested.exited).toBe(0);
+    const request = JSON.parse(await new Response(requested.stdout).text()) as {
+      id: string;
+      status: string;
+      requestNotifiedAt?: string;
+    };
+    expect(request.status).toBe("requested");
+
+    const accepted = Bun.spawn(
+      [
+        process.execPath,
+        cli,
+        "coordination",
+        "respond-transfer",
+        "--id",
+        request.id,
+        "--decision",
+        "accept",
+        "--owner",
+        "holder",
+      ],
+      { env, stdout: "pipe", stderr: "pipe" },
+    );
+    expect(await accepted.exited).toBe(0);
+    const response = JSON.parse(await new Response(accepted.stdout).text()) as {
+      status: string;
+      actualOwner?: { label: string };
+    };
+    expect(response.status).toBe("accepted");
+    expect(response.actualOwner?.label).toBe("requester");
+
+    const transferFiles = readdirSync(
+      join(home, ".claude", "agent-mail", "transfers"),
+    ).filter((name) => name.endsWith(".json"));
+    expect(transferFiles).toHaveLength(1);
+    const stored = JSON.parse(
+      readFileSync(
+        join(home, ".claude", "agent-mail", "transfers", transferFiles[0]),
+        "utf8",
+      ),
+    ) as { requestNotifiedAt?: string; resolutionNotifiedAt?: string };
+    expect(stored.requestNotifiedAt).toBeDefined();
+    expect(stored.resolutionNotifiedAt).toBeDefined();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

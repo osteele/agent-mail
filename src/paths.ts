@@ -8,7 +8,9 @@
  *   session-names/<id>.json persistent generated session names
  *   claims/<slug>/          experiment-number and path claims
  *   work/<slug>/            exclusive logical-work leases
+ *   transfers/              auditable work-lease transfer requests
  *   presence.json          daemon snapshot of the live registry
+ *   processes.json         daemon snapshot of coordination-owner processes
  *   daemon.pid, daemon.log daemon state
  * Config:     ~/.config/agent-mail/config.toml
  */
@@ -26,6 +28,7 @@ export const REGISTRY_DIR = join(STATE_DIR, "registry");
 export const SESSION_NAMES_DIR = join(STATE_DIR, "session-names");
 export const CLAIMS_DIR = join(STATE_DIR, "claims");
 export const WORK_DIR = join(STATE_DIR, "work");
+export const TRANSFERS_DIR = join(STATE_DIR, "transfers");
 export const CONFIG_DIR = join(homedir(), ".config", "agent-mail");
 export const CONFIG_PATH = join(CONFIG_DIR, "config.toml");
 export const PID_PATH = join(STATE_DIR, "daemon.pid");
@@ -35,6 +38,7 @@ export const SLACK_DASHBOARD_PATH = join(STATE_DIR, "slack-dashboard.json");
 /** Periodic daemon snapshot of the pid-verified live registry, so readers on a
  * latency budget can skip the process scan. */
 export const PRESENCE_SNAPSHOT_PATH = join(STATE_DIR, "presence.json");
+export const PROCESS_SNAPSHOT_PATH = join(STATE_DIR, "processes.json");
 
 export const DEFAULT_PORT = 8377;
 export const LAUNCHD_LABEL = "com.osteele.agent-mail";
@@ -49,6 +53,7 @@ export function ensureDirs(): void {
     SESSION_NAMES_DIR,
     CLAIMS_DIR,
     WORK_DIR,
+    TRANSFERS_DIR,
     CONFIG_DIR,
   ]) {
     mkdirSync(dir, { recursive: true });

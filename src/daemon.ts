@@ -18,6 +18,7 @@ import { type Config, loadConfig } from "./config.ts";
 import { dashboardResponse } from "./dashboard.ts";
 import { LOG_PATH, PID_PATH, canonicalProject, ensureDirs } from "./paths.ts";
 import { writePresenceSnapshot } from "./presence.ts";
+import { writeProcessSnapshot } from "./processSnapshot.ts";
 import { listLive } from "./registry.ts";
 import { claudeSessions, resetSessionAliasCache } from "./sessions.ts";
 import { formatSlackEcho } from "./slackEcho.ts";
@@ -31,6 +32,7 @@ import {
   readReceipts,
   shouldEchoMessageToSlack,
 } from "./spool.ts";
+import { flushTransferNotifications, transfers } from "./transfers.ts";
 
 let config: Config = loadConfig();
 
@@ -233,6 +235,12 @@ let lastLiveCount = -1;
 function tickPresence(): void {
   try {
     const snapshot = writePresenceSnapshot();
+    writeProcessSnapshot();
+    flushTransferNotifications();
+    for (const request of transfers.settleExpired()) {
+      log(`coordination transfer ${request.id}: ${request.status}`);
+    }
+    flushTransferNotifications();
     // Log only on change: this fires every 10s and daemon.log is long-lived.
     if (snapshot.sessions.length !== lastLiveCount) {
       lastLiveCount = snapshot.sessions.length;

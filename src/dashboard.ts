@@ -3,7 +3,7 @@
  * No build step and no external assets, so it works offline. */
 
 import { spawn } from "node:child_process";
-import { buildState } from "./dashboardData.ts";
+import { buildReadOnlyState } from "./dashboardData.ts";
 
 /** Open a URL in the user's default browser (best-effort, detached). */
 export function openBrowser(url: string): void {
@@ -188,8 +188,10 @@ export function dashboardResponse(request: Request): Response | undefined {
       headers: { "Content-Type": "text/html; charset=utf-8" },
     });
   }
-  if (pathname === "/api/state") {
-    return new Response(JSON.stringify(buildState()), {
+  if (pathname === "/api/state" || pathname === "/api/v1/state") {
+    const url = new URL(request.url);
+    const project = url.searchParams.get("project") ?? undefined;
+    return new Response(JSON.stringify(buildReadOnlyState({ project })), {
       headers: { "Content-Type": "application/json" },
     });
   }

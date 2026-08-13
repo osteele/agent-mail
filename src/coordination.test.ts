@@ -59,7 +59,30 @@ test("an unavailable process scan does not classify a PID owner as offline", () 
       "2026-08-13T12:00:00.000Z",
       { processes: new Map(), reliable: false },
     ),
-  ).toBe("manual");
+  ).toBe("unverifiable");
+});
+
+test("unavailable PID evidence is surfaced as owner-unverifiable", () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-unverifiable-"));
+  temporaryDirectories.push(root);
+  const project = join(root, "project");
+  mkdirSync(project);
+  const workStore = new WorkStore(join(root, "work"));
+  workStore.acquire(
+    project,
+    { type: "task", key: "legacy" },
+    { id: "cli:42", label: "legacy", pid: 42 },
+  );
+  const entry = listCoordination({
+    project,
+    registrations: [],
+    processes: { processes: new Map(), reliable: false },
+    claimStore: new ClaimStore(join(root, "claims")),
+    workStore,
+  })[0];
+  expect(entry.ownerStatus).toBe("unverifiable");
+  expect(entry.condition).toBe("owner-unverifiable");
+  expect(entry.recoverable).toBe(false);
 });
 
 test("a replacement registration cannot adopt a legacy session-owned record", () => {

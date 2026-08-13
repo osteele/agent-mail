@@ -18,7 +18,7 @@ export type MessageOriginKind = "agent" | "automation" | "human";
  * apply their own permission rules to work requested by any message. */
 export interface MessageOrigin {
   kind: MessageOriginKind;
-  transport: "mcp" | "cli" | "http" | "native-audit";
+  transport: "mcp" | "cli" | "http" | "native-audit" | "internal";
   client?: string;
   sessionId?: string;
   authority: "untrusted";
@@ -374,7 +374,7 @@ export function readMessages(
 /** Every message across every project spool, oldest-first. For dashboards and
  * cross-project aggregation; per-project read-state is applied. */
 export function readAllMessages(): StoredMessage[] {
-  ensureDirs();
+  if (!existsSync(INBOX_DIR)) return [];
   const out: StoredMessage[] = [];
   for (const name of readdirSync(INBOX_DIR)) {
     if (!name.endsWith(".jsonl")) continue;

@@ -71,6 +71,12 @@ test("claim_path accepts and releases an atomic path batch over MCP", async () =
     const tools = await client.listTools();
     const claimTool = tools.tools.find((tool) => tool.name === "claim_path");
     expect(claimTool?.inputSchema.properties).toHaveProperty("paths");
+    expect(
+      tools.tools.some((tool) => tool.name === "request_coordination_transfer"),
+    ).toBe(true);
+    expect(
+      tools.tools.some((tool) => tool.name === "respond_coordination_transfer"),
+    ).toBe(true);
 
     await client.callTool({ name: "check_inbox" });
     const registry = join(home, ".claude", "agent-mail", "registry");

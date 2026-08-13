@@ -4,8 +4,10 @@
  * dashboard works even when the daemon is down. */
 
 import { type CoordinationEntry, listCoordination } from "./coordination.ts";
-import { displayName } from "./paths.ts";
-import { type Registration, listLive } from "./registry.ts";
+import { canonicalProject, displayName } from "./paths.ts";
+import { readListenerSnapshot } from "./presence.ts";
+import { readProcessSnapshot } from "./processSnapshot.ts";
+import { type ProcessScan, type Registration, listLive } from "./registry.ts";
 import {
   activityTag,
   claudeSessions,
@@ -13,6 +15,7 @@ import {
   sessionNames,
 } from "./sessions.ts";
 import { type StoredMessage, readAllMessages } from "./spool.ts";
+import { type WorkTransferRequest, transfers } from "./transfers.ts";
 
 export interface FlowRoute {
   from: string;
@@ -41,6 +44,11 @@ export interface PresenceEntry {
   inboundPolicy: string;
   muted?: boolean; // channel push paused
   pid: number;
+  procStart?: string;
+  instanceId?: string;
+  started: string;
+  lastSeen?: string;
+  lastInboxPoll?: string;
 }
 
 export interface VolumeBucket {
@@ -64,6 +72,20 @@ export interface WorkEntry {
 }
 
 export interface DashboardState {
+  schemaVersion: 1;
+  generatedAt: string;
+  source: {
+    mode: "live-filesystem" | "filesystem-snapshot";
+    presence: "live-registry" | "presence-snapshot";
+    coordination: "filesystem";
+    messages: "spool";
+  };
+  freshness: {
+    presence: boolean;
+    presenceGeneratedAt: number | null;
+    processEvidence: boolean;
+    processEvidenceGeneratedAt: number | null;
+  };
   now: string;
   totals: {
     messages: number;
@@ -80,6 +102,8 @@ export interface DashboardState {
   routes: FlowRoute[];
   log: LogEntry[];
   volume: VolumeBucket[];
+  messages: StoredMessage[];
+  transfers: WorkTransferRequest[];
 }
 
 function activeWork(entries: CoordinationEntry[]): WorkEntry[] {
@@ -142,6 +166,11 @@ function presence(registrations: Registration[]): PresenceEntry[] {
         inboundPolicy: r.inboundPolicy ?? "accept",
         muted: r.muted,
         pid: r.pid,
+        procStart: r.procStart,
+        instanceId: r.instanceId,
+        started: r.started,
+        lastSeen: r.lastSeen,
+        lastInboxPoll: r.lastInboxPoll,
       };
     })
     .sort((a, b) => a.project.localeCompare(b.project));
@@ -194,14 +223,33 @@ function volume(msgs: StoredMessage[], now: Date, hours = 24): VolumeBucket[] {
   return buckets;
 }
 
-export function buildState(opts: { logLimit?: number } = {}): DashboardState {
+export function buildState(
+  opts: {
+    logLimit?: number;
+    project?: string;
+    registrations?: Registration[];
+    processes?: ProcessScan;
+    registrationsReliable?: boolean;
+    sourceMode?: "live-filesystem" | "filesystem-snapshot";
+    presenceFresh?: boolean;
+    presenceGeneratedAt?: number | null;
+    processEvidenceFresh?: boolean;
+    processEvidenceGeneratedAt?: number | null;
+  } = {},
+): DashboardState {
   const logLimit = opts.logLimit ?? 60;
-  const msgs = readAllMessages();
+  const msgs = readAllMessages().filter(
+    (message) => !opts.project || message.project === opts.project,
+  );
   const now = new Date();
-  const live = listLive();
+  const live = (opts.registrations ?? listLive()).filter(
+    (registration) => !opts.project || registration.cwd === opts.project,
+  );
   const coordination = listCoordination({
-    allProjects: true,
+    ...(opts.project ? { project: opts.project } : { allProjects: true }),
     registrations: live,
+    registrationsReliable: opts.registrationsReliable,
+    ...(opts.processes ? { processes: opts.processes } : {}),
   });
   const leases = activeWork(coordination);
   const log: LogEntry[] = msgs
@@ -215,6 +263,23 @@ export function buildState(opts: { logLimit?: number } = {}): DashboardState {
       preview: preview(m.message),
     }));
   return {
+    schemaVersion: 1,
+    generatedAt: now.toISOString(),
+    source: {
+      mode: opts.sourceMode ?? "live-filesystem",
+      presence:
+        opts.sourceMode === "filesystem-snapshot"
+          ? "presence-snapshot"
+          : "live-registry",
+      coordination: "filesystem",
+      messages: "spool",
+    },
+    freshness: {
+      presence: opts.presenceFresh ?? true,
+      presenceGeneratedAt: opts.presenceGeneratedAt ?? null,
+      processEvidence: opts.processEvidenceFresh ?? true,
+      processEvidenceGeneratedAt: opts.processEvidenceGeneratedAt ?? null,
+    },
     now: now.toISOString(),
     totals: {
       messages: msgs.length,
@@ -231,5 +296,39 @@ export function buildState(opts: { logLimit?: number } = {}): DashboardState {
     routes: routes(msgs),
     log,
     volume: volume(msgs, now),
+    messages: msgs.slice(-logLimit).reverse(),
+    transfers: transfers.list(opts.project),
   };
+}
+
+/** Stable, non-mutating state aggregation for automation and the HTTP API. */
+export function buildReadOnlyState(
+  opts: { logLimit?: number; project?: string; nowMs?: number } = {},
+): DashboardState {
+  const nowMs = opts.nowMs ?? Date.now();
+  const project = opts.project ? canonicalProject(opts.project) : undefined;
+  const listener = readListenerSnapshot(project, nowMs);
+  const records = listCoordination({
+    ...(project ? { project } : { allProjects: true }),
+    registrations: listener.sessions,
+    registrationsReliable: listener.fresh,
+    processes: { processes: new Map(), reliable: false },
+  });
+  const ownerPids = records
+    .map((record) => record.owner)
+    .filter((owner) => !owner.sessionId && owner.pid !== undefined)
+    .map((owner) => owner.pid as number);
+  const processReport = readProcessSnapshot(ownerPids, nowMs);
+  return buildState({
+    logLimit: opts.logLimit,
+    project,
+    registrations: listener.sessions,
+    registrationsReliable: listener.fresh,
+    processes: processReport.evidence,
+    sourceMode: "filesystem-snapshot",
+    presenceFresh: listener.fresh,
+    presenceGeneratedAt: listener.generatedAt,
+    processEvidenceFresh: processReport.fresh,
+    processEvidenceGeneratedAt: processReport.generatedAt,
+  });
 }

@@ -46,18 +46,21 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   type Claim,
+  ClaimConflictError,
   type ClaimOwner,
   claims,
   pathClaimTargets,
 } from "./claims.ts";
 import { loadConfig } from "./config.ts";
 import {
+  coordinationConflictAdvice,
   ownerStatus as coordinationOwnerStatus,
   describeCoordination,
   listCoordination,
   recoverCoordination,
 } from "./coordination.ts";
 import { openBrowser, serveDashboard } from "./dashboard.ts";
+import { buildReadOnlyState } from "./dashboardData.ts";
 import {
   addNativeAuditHook,
   claudeRegistrationMatches,
@@ -103,7 +106,13 @@ import {
   readMessages,
   readReceipts,
 } from "./spool.ts";
+import {
+  findWorkLease,
+  flushTransferNotifications,
+  transfers,
+} from "./transfers.ts";
 import { type WorkLease, type WorkState, work } from "./work.ts";
+import { WorkConflictError } from "./work.ts";
 
 function capabilityTag(r: Registration): string {
   const capabilities = r.capabilities;
@@ -727,6 +736,26 @@ function describeClaim(claim: Claim): string {
   return `${claim.id} ${resource} — ${claim.owner.label} [${claim.createdAt}]`;
 }
 
+function withConflictGuidance<T>(project: string, operation: () => T): T {
+  try {
+    return operation();
+  } catch (error) {
+    const record =
+      error instanceof WorkConflictError
+        ? error.lease
+        : error instanceof ClaimConflictError
+          ? error.claim
+          : undefined;
+    if (!record) throw error;
+    const entry = listCoordination({ project }).find(
+      (candidate) => candidate.id === record.id,
+    );
+    if (!entry) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${message}; ${coordinationConflictAdvice(entry)}`);
+  }
+}
+
 function cmdClaimExperiment(flags: Record<string, string | boolean>): void {
   const project = claimProject(flags);
   const notebook =
@@ -756,15 +785,17 @@ function cmdClaimPath(
   }
   const project = claimProject(flags);
   const pathType = flags.directory === true ? "directory" : "file";
-  const claim = claims.claimPaths(
-    project,
-    paths.map((path) => ({ path: resolve(project, path), pathType })),
-    cliOwner(flags, project),
-    {
-      ownerIsLive: (owner, claim) =>
-        coordinationOwnerStatus(owner, listLive(), claim.createdAt) !==
-        "offline",
-    },
+  const claim = withConflictGuidance(project, () =>
+    claims.claimPaths(
+      project,
+      paths.map((path) => ({ path: resolve(project, path), pathType })),
+      cliOwner(flags, project),
+      {
+        ownerIsLive: (owner, claim) =>
+          coordinationOwnerStatus(owner, listLive(), claim.createdAt) !==
+          "offline",
+      },
+    ),
   );
   console.log(`${claim.id}`);
   for (const target of pathClaimTargets(claim)) {
@@ -819,6 +850,10 @@ function cmdCoordination(
     if (typeof flags.condition === "string") {
       entries = entries.filter((entry) => entry.condition === flags.condition);
     }
+    if (flags.json === true) {
+      console.log(JSON.stringify({ schemaVersion: 1, entries }, null, 2));
+      return;
+    }
     if (entries.length === 0) {
       console.log("no active coordination");
       return;
@@ -838,7 +873,66 @@ function cmdCoordination(
     );
     return;
   }
-  throw new Error("usage: agent-mail coordination list|recover [options]");
+  if (subcommand === "request-transfer") {
+    if (typeof flags.id !== "string") {
+      throw new Error(
+        "usage: agent-mail coordination request-transfer --id <work-id> [--reason <text>] [--timeout <seconds>] [--owner <label>]",
+      );
+    }
+    const lease = findWorkLease(flags.id);
+    const timeoutSeconds =
+      typeof flags.timeout === "string" ? Number(flags.timeout) : undefined;
+    const result = transfers.request(lease, cliOwner(flags, lease.project), {
+      reason: typeof flags.reason === "string" ? flags.reason : undefined,
+      timeoutSeconds,
+    });
+    flushTransferNotifications();
+    console.log(JSON.stringify(result.request, null, 2));
+    return;
+  }
+  if (subcommand === "respond-transfer") {
+    if (
+      typeof flags.id !== "string" ||
+      (flags.decision !== "accept" && flags.decision !== "decline")
+    ) {
+      throw new Error(
+        "usage: agent-mail coordination respond-transfer --id <request-id> --decision accept|decline [--message <text>] [--owner <label>]",
+      );
+    }
+    const request = transfers.get(flags.id);
+    if (!request) throw new Error(`transfer request not found: ${flags.id}`);
+    const result = transfers.respond(
+      request.id,
+      cliOwner(flags, request.project),
+      flags.decision,
+      typeof flags.message === "string" ? flags.message : undefined,
+    );
+    flushTransferNotifications();
+    console.log(JSON.stringify(result.request, null, 2));
+    return;
+  }
+  if (subcommand === "transfers") {
+    transfers.settleExpired();
+    flushTransferNotifications();
+    const requests = flags.all
+      ? transfers.list()
+      : transfers.list(claimProject(flags));
+    if (flags.json === true) {
+      console.log(JSON.stringify({ schemaVersion: 1, requests }, null, 2));
+    } else if (requests.length === 0) {
+      console.log("no coordination transfers");
+    } else {
+      for (const request of requests) {
+        console.log(
+          `${request.id} ${displayName(request.project)}/${request.resourceType}:${request.resourceKey} — ${request.requester.label} requests from ${request.expectedOwner.label} [${request.status}] [deadline ${request.deadline}]`,
+        );
+      }
+    }
+    return;
+  }
+  throw new Error(
+    "usage: agent-mail coordination list|recover|request-transfer|respond-transfer|transfers [options]",
+  );
 }
 
 function parseWorkState(
@@ -900,25 +994,32 @@ function cmdWork(
     }
     const project = claimProject(flags);
     const owner = cliOwner(flags, project);
-    const lease = work.acquire(
-      project,
-      {
-        type: flags.type,
-        key: flags.key,
-        ...(typeof flags.label === "string" ? { label: flags.label } : {}),
-        ...(typeof flags.source === "string"
-          ? { sourcePath: resolve(project, flags.source) }
-          : {}),
-      },
-      owner,
-      {
-        state: parseWorkState(flags.state),
-        activity:
-          typeof flags.activity === "string" ? flags.activity : undefined,
-        ownerIsLive: (candidate, existing) =>
-          coordinationOwnerStatus(candidate, listLive(), existing.createdAt) !==
-          "offline",
-      },
+    const resourceType = flags.type;
+    const resourceKey = flags.key;
+    const lease = withConflictGuidance(project, () =>
+      work.acquire(
+        project,
+        {
+          type: resourceType,
+          key: resourceKey,
+          ...(typeof flags.label === "string" ? { label: flags.label } : {}),
+          ...(typeof flags.source === "string"
+            ? { sourcePath: resolve(project, flags.source) }
+            : {}),
+        },
+        owner,
+        {
+          state: parseWorkState(flags.state),
+          activity:
+            typeof flags.activity === "string" ? flags.activity : undefined,
+          ownerIsLive: (candidate, existing) =>
+            coordinationOwnerStatus(
+              candidate,
+              listLive(),
+              existing.createdAt,
+            ) !== "offline",
+        },
+      ),
     );
     console.log(describeWork(lease));
     return;
@@ -1372,6 +1473,32 @@ async function cmdDashboard(
   }
 }
 
+async function cmdState(
+  flags: Record<string, string | boolean>,
+): Promise<void> {
+  const project =
+    typeof flags.project === "string"
+      ? canonicalProject(flags.project)
+      : undefined;
+  if (flags["no-sync"] !== true) {
+    const config = loadConfig();
+    const query = project ? `?project=${encodeURIComponent(project)}` : "";
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${config.port}/api/v1/state${query}`,
+        { signal: AbortSignal.timeout(750) },
+      );
+      if (response.ok) {
+        console.log(await response.text());
+        return;
+      }
+    } catch {
+      // The snapshot-only filesystem fallback below is deliberately read-only.
+    }
+  }
+  console.log(JSON.stringify(buildReadOnlyState({ project }), null, 2));
+}
+
 async function cmdSlackDashboard(
   flags: Record<string, string | boolean>,
 ): Promise<void> {
@@ -1444,12 +1571,23 @@ Coordination:
   work release --id <work-id> [--project <dir>]
                         Release responsibility for logical work
   coordination list [--project <dir> | --all] [--kind <kind>]
-                    [--owner <owner>] [--condition <condition>]
+                    [--owner <owner>] [--condition <condition>] [--json]
                         List work and claims with recovery conditions
   coordination recover --id <coordination-id>
                         Release a record only when its owner is proven offline
+  coordination request-transfer --id <work-id> [--reason <text>]
+                    [--timeout <seconds>] [--owner <label>]
+                        Request an auditable asynchronous work handoff
+  coordination respond-transfer --id <request-id>
+                    --decision accept|decline [--message <text>]
+                        Answer a transfer request as the exact lease owner
+  coordination transfers [--project <dir> | --all] [--json]
+                        List transfer requests and dispositions
 
 Dashboards:
+  state [--project <dir>] [--no-sync] [--json]
+                        Versioned, non-mutating aggregate state. Uses the daemon
+                        when available; --no-sync reads filesystem snapshots.
   dashboard [--port N] [--open] [--no-tui]
                         Show the persistent daemon dashboard, or serve a
                         direct-filesystem fallback when the daemon is down
@@ -1552,6 +1690,9 @@ switch (cmd) {
     break;
   case "dashboard":
     await cmdDashboard(flags);
+    break;
+  case "state":
+    await cmdState(flags);
     break;
   case "slack-dashboard":
     await cmdSlackDashboard(flags);

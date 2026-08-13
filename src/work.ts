@@ -55,6 +55,13 @@ export class WorkConflictError extends Error {
   }
 }
 
+export class WorkTransferSupersededError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkTransferSupersededError";
+  }
+}
+
 function canonicalPath(path: string): string {
   const absolute = resolve(path);
   if (existsSync(absolute)) return realpathSync(absolute);
@@ -100,7 +107,7 @@ function validateText(
   return trimmed;
 }
 
-function sameOwnerProcess(a: WorkOwner, b: WorkOwner): boolean {
+export function sameWorkOwner(a: WorkOwner, b: WorkOwner): boolean {
   if (a.id !== b.id) return false;
   if (a.instanceId || b.instanceId) {
     return a.instanceId !== undefined && a.instanceId === b.instanceId;
@@ -124,7 +131,7 @@ function ownerMatches(
 ): boolean {
   return typeof credential === "string"
     ? owner.id === credential
-    : sameOwnerProcess(owner, credential);
+    : sameWorkOwner(owner, credential);
 }
 
 export class WorkStore {
@@ -272,11 +279,9 @@ export class WorkStore {
           lease.resource.type === normalizedResource.type &&
           lease.resource.key === normalizedResource.key,
       );
-      const owned = existing.find((lease) =>
-        sameOwnerProcess(lease.owner, owner),
-      );
+      const owned = existing.find((lease) => sameWorkOwner(lease.owner, owner));
       const conflicts = existing.filter(
-        (lease) => !sameOwnerProcess(lease.owner, owner),
+        (lease) => !sameWorkOwner(lease.owner, owner),
       );
       const now = new Date().toISOString();
       for (const conflict of conflicts) {
@@ -374,6 +379,43 @@ export class WorkStore {
       }
       unlinkSync(join(this.projectDir(canonical), `${lease.id}.json`));
       return lease;
+    });
+  }
+
+  /** Atomically replace the exact owner/version captured by a transfer request. */
+  transfer(
+    project: string,
+    leaseId: string,
+    expectedOwner: WorkOwner,
+    expectedUpdatedAt: string,
+    newOwner: WorkOwner,
+  ): WorkLease {
+    const canonical = canonicalProject(project);
+    return this.withLock(canonical, () => {
+      const lease = this.list(canonical).find((item) => item.id === leaseId);
+      if (!lease) {
+        throw new WorkTransferSupersededError(
+          `work lease not found: ${leaseId}`,
+        );
+      }
+      if (sameWorkOwner(lease.owner, newOwner)) return lease;
+      if (
+        !sameWorkOwner(lease.owner, expectedOwner) ||
+        lease.updatedAt !== expectedUpdatedAt
+      ) {
+        throw new WorkTransferSupersededError(
+          `work lease ${leaseId} changed after the transfer request`,
+        );
+      }
+      const transferred: WorkLease = {
+        ...lease,
+        owner: newOwner,
+        state: "working",
+        activity: `Transferred from ${expectedOwner.label}`,
+        updatedAt: new Date().toISOString(),
+      };
+      this.write(transferred, true);
+      return transferred;
     });
   }
 

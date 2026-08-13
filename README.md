@@ -326,6 +326,9 @@ reservations in one project or cross-project view. Each record has a condition:
   manual owner. The listing reports the owner status separately.
 - `owner-offline` — the recorded session and process identity is definitively
   dead; the record is eligible for agent recovery.
+- `owner-unverifiable` — the caller cannot obtain reliable process evidence.
+  The record remains protected; this is distinct from deliberate `manual`
+  ownership.
 - `source-missing` — a work lease's optional source path is absent.
 - `target-absent` — a claimed edit target is absent, which can be expected
   while creating it.
@@ -349,6 +352,25 @@ that contain a PID but no session ID are process-owned rather than manual;
 agent-mail uses process start time to reject a recycled PID and makes the record
 recoverable once the original process is gone.
 
+Sandboxed clients that cannot invoke `ps` use the daemon's fresh, PID-scoped
+process-evidence snapshot. The snapshot lists every inspected owner PID and is
+accepted only when the scan succeeded, covered the requested PID, and is at
+most 30 seconds old. Missing, stale, partial, or failed evidence produces
+`owner-unverifiable`, never `owner-offline`.
+
+### Work transfer requests
+
+`request_coordination_transfer` requests a logical work lease and returns
+immediately with a durable request ID, current holder, and deadline. The holder
+answers with `respond_coordination_transfer` (`accept` or `decline`). An
+unchanged lease transfers automatically after the deadline. Any intervening
+lease update, release, or ownership change makes the request `superseded`
+instead, so stale requests cannot overwrite newer work. Requests and final
+dispositions remain under `~/.claude/agent-mail/transfers/` for audit.
+
+Transfers currently apply only to logical work leases. Path claims and
+experiment reservations retain their stricter release/recovery semantics.
+
 CLI equivalents support inspection, manual ownership, and recovery:
 
 ```bash
@@ -356,8 +378,11 @@ agent-mail work list [--project <dir> | --all] [--type <type>] [--owner <owner>]
 agent-mail work acquire --type <type> --key <key> [--label <label>] [--source <path>] [--owner <label>]
 agent-mail work update --id <work-id> [--state working|waiting] [--activity <text>]
 agent-mail work release --id <work-id> [--project <dir>]
-agent-mail coordination list [--project <dir> | --all] [--kind <kind>]
+agent-mail coordination list [--project <dir> | --all] [--kind <kind>] [--json]
 agent-mail coordination recover --id <coordination-id>
+agent-mail coordination request-transfer --id <work-id> [--reason <text>] [--timeout <seconds>]
+agent-mail coordination respond-transfer --id <request-id> --decision accept|decline [--message <text>]
+agent-mail coordination transfers [--project <dir> | --all] [--json]
 ```
 
 ## Client integration and updates
@@ -482,6 +507,8 @@ agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
 agent-mail receipts [--project <dir>] [--id <message-id>] [--limit N]
 agent-mail listeners [--project <dir>] [--json] [--no-sync]
                                       # attached sessions + idle times
+agent-mail state [--project <dir>] [--no-sync] [--json]
+                                      # stable non-mutating aggregate state
 agent-mail status-line [--project <dir>] [--session <id>] [--debug]  # see below
 agent-mail mute|unmute (--session <name-or-id> | --project <dir>)  # pause/resume push
 agent-mail inbound --policy accept|hold|refuse \
@@ -494,8 +521,11 @@ agent-mail work list [--project <dir> | --all] [--type <type>] [--owner <owner>]
 agent-mail work acquire --type <type> --key <key> [--label <label>] [--source <path>] [--owner <label>]
 agent-mail work update --id <work-id> [--state working|waiting] [--activity <text>]
 agent-mail work release --id <work-id> [--project <dir>]
-agent-mail coordination list [--project <dir> | --all] [--kind <kind>]
+agent-mail coordination list [--project <dir> | --all] [--kind <kind>] [--json]
 agent-mail coordination recover --id <coordination-id>
+agent-mail coordination request-transfer --id <work-id> [--reason <text>] [--timeout <seconds>]
+agent-mail coordination respond-transfer --id <request-id> --decision accept|decline [--message <text>]
+agent-mail coordination transfers [--project <dir> | --all] [--json]
 agent-mail dashboard [--port N] [--open] [--no-tui]   # web dashboard
 agent-mail slack-dashboard [--watch <seconds>]        # editable Slack dashboard
 agent-mail start|stop|restart|status  # daemon (launchd-aware)
@@ -600,6 +630,25 @@ different source. If the daemon snapshot is missing, malformed, or older than
 is suitable for conservative advisory routing; it is not proof of delivery or
 attention.
 
+For a normalized cross-surface view, use
+`agent-mail state --no-sync --json` (optionally `--project <dir>`) or
+`GET /api/v1/state?project=<dir>`. Schema version 1 includes normalized
+presence with process identity and freshness, coordination entries with owner
+status and conditions, transfer requests, recent canonical message IDs and read
+state, routes, counts, logs, and source provenance. Both interfaces are
+read-only: they do not scan processes, prune registrations, or mutate claims
+or leases. The CLI without `--no-sync` asks the daemon first and falls back to
+the same filesystem-snapshot reader. Consumers must inspect the `freshness`
+fields rather than treating an old snapshot as negative liveness evidence.
+
+Schema-v1 top-level fields are `schemaVersion`, `generatedAt`, `source`,
+`freshness`, `totals`, `presence`, `coordination`, `transfers`, `messages`,
+`routes`, `log`, `volume`, and the compatibility `work` projection. `messages`
+contains the newest 60 records in newest-first order; totals, routes, and volume
+are computed from the full spool history. Additive fields may appear within
+version 1; removing or changing the meaning of a field requires a new schema
+version and endpoint.
+
 For poll-only sessions, `lastSeen` means only that some agent-mail tool ran; it
 does not imply that the inbox was checked. `lastInboxPoll` is stamped only by
 `check_inbox`, including an empty check, so automation can distinguish recent
@@ -647,7 +696,8 @@ boundary. Deliberate Claude `/rename` names are kept verbatim.
 | Endpoint | Description |
 |---|---|
 | `GET /` | persistent read-only web dashboard |
-| `GET /api/state` | dashboard state, including unified coordination health |
+| `GET /api/v1/state?project=<path>` | schema-v1 non-mutating aggregate state; project is optional |
+| `GET /api/state` | compatibility alias for `/api/v1/state` |
 | `POST /notify` | `{project, message, from?, meta?, idempotencyKey?, ttlSeconds?, slackEcho?}` → guarded spool + optional Slack echo |
 | `POST /read` | `{project, ids}` or `{project, all:true}` → mark messages read |
 | `GET /health` | liveness + config summary |

@@ -10,12 +10,12 @@ import {
   pathClaimTargets,
 } from "./claims.ts";
 import { displayName } from "./paths.ts";
+import { coordinationProcessEvidence } from "./processSnapshot.ts";
 import {
   type ProcessInfo,
   type ProcessScan,
   type Registration,
   listLive,
-  scanProcesses,
 } from "./registry.ts";
 import {
   type WorkLease,
@@ -25,10 +25,11 @@ import {
 } from "./work.ts";
 
 export type CoordinationKind = "work" | "path-claim" | "experiment-claim";
-export type OwnerStatus = "live" | "offline" | "manual";
+export type OwnerStatus = "live" | "offline" | "manual" | "unverifiable";
 export type CoordinationCondition =
   | "healthy"
   | "owner-offline"
+  | "owner-unverifiable"
   | "source-missing"
   | "target-absent"
   | "awaiting-materialization"
@@ -60,6 +61,7 @@ export function ownerStatus(
   registrations: Registration[],
   createdAt?: string,
   processEvidence?: Map<number, ProcessInfo> | ProcessScan,
+  registrationsReliable = true,
 ): OwnerStatus {
   if (owner.sessionId && owner.pid !== undefined) {
     const registration = registrations.find(
@@ -67,7 +69,8 @@ export function ownerStatus(
         registration.sessionId === owner.sessionId &&
         registration.pid === owner.pid,
     );
-    if (!registration) return "offline";
+    if (!registration)
+      return registrationsReliable ? "offline" : "unverifiable";
     if (owner.instanceId) {
       return registration.instanceId === owner.instanceId ? "live" : "offline";
     }
@@ -78,7 +81,7 @@ export function ownerStatus(
       const registeredAt = Date.parse(registration.started);
       const recordCreatedAt = Date.parse(createdAt);
       if (!Number.isFinite(registeredAt) || !Number.isFinite(recordCreatedAt)) {
-        return "manual";
+        return "unverifiable";
       }
       if (registeredAt > recordCreatedAt) return "offline";
     }
@@ -89,8 +92,8 @@ export function ownerStatus(
   const scan =
     processEvidence instanceof Map
       ? { processes: processEvidence, reliable: true }
-      : (processEvidence ?? scanProcesses([owner.pid]));
-  if (!scan.reliable) return "manual";
+      : (processEvidence ?? coordinationProcessEvidence([owner.pid]));
+  if (!scan.reliable) return "unverifiable";
   const info = scan.processes.get(owner.pid);
   if (!info) return "offline";
   if (owner.procStart) {
@@ -100,11 +103,11 @@ export function ownerStatus(
   // Legacy CLI records stored a pid but not its process start. A replacement
   // process with the same pid must have started after the record was created,
   // so the timestamps still prove that the original owner is dead. If either
-  // timestamp cannot be parsed, preserve the record as unverifiable/manual.
+  // timestamp cannot be parsed, preserve the record as unverifiable.
   const processStartedAt = Date.parse(info.start);
   const recordCreatedAt = createdAt ? Date.parse(createdAt) : Number.NaN;
   if (!Number.isFinite(processStartedAt) || !Number.isFinite(recordCreatedAt)) {
-    return "manual";
+    return "unverifiable";
   }
   return processStartedAt <= recordCreatedAt ? "live" : "offline";
 }
@@ -143,12 +146,14 @@ function claimEntry(
   claim: Claim,
   registrations: Registration[],
   processes: ProcessScan,
+  registrationsReliable: boolean,
 ): CoordinationEntry {
   const status = ownerStatus(
     claim.owner,
     registrations,
     claim.createdAt,
     processes,
+    registrationsReliable,
   );
   const registration =
     status === "offline"
@@ -175,9 +180,11 @@ function claimEntry(
       condition:
         status === "offline"
           ? "owner-offline"
-          : files.length
-            ? "materialized"
-            : "awaiting-materialization",
+          : status === "unverifiable"
+            ? "owner-unverifiable"
+            : files.length
+              ? "materialized"
+              : "awaiting-materialization",
       recoverable: status === "offline",
       createdAt: claim.createdAt,
       updatedAt: claim.createdAt,
@@ -201,9 +208,11 @@ function claimEntry(
     condition:
       status === "offline"
         ? "owner-offline"
-        : paths.some((path) => !existsSync(path))
-          ? "target-absent"
-          : "healthy",
+        : status === "unverifiable"
+          ? "owner-unverifiable"
+          : paths.some((path) => !existsSync(path))
+            ? "target-absent"
+            : "healthy",
     recoverable: status === "offline",
     createdAt: claim.createdAt,
     updatedAt: claim.createdAt,
@@ -214,12 +223,14 @@ function workEntry(
   lease: WorkLease,
   registrations: Registration[],
   processes: ProcessScan,
+  registrationsReliable: boolean,
 ): CoordinationEntry {
   const status = ownerStatus(
     lease.owner,
     registrations,
     lease.createdAt,
     processes,
+    registrationsReliable,
   );
   const registration =
     status === "offline"
@@ -242,9 +253,11 @@ function workEntry(
     condition:
       status === "offline"
         ? "owner-offline"
-        : sources.some((path) => !existsSync(path))
-          ? "source-missing"
-          : "healthy",
+        : status === "unverifiable"
+          ? "owner-unverifiable"
+          : sources.some((path) => !existsSync(path))
+            ? "source-missing"
+            : "healthy",
     recoverable: status === "offline",
     state: lease.state,
     activity: lease.activity,
@@ -258,7 +271,8 @@ export function listCoordination(
     project?: string;
     allProjects?: boolean;
     registrations?: Registration[];
-    processes?: Map<number, ProcessInfo>;
+    registrationsReliable?: boolean;
+    processes?: Map<number, ProcessInfo> | ProcessScan;
     claimStore?: ClaimStore;
     workStore?: WorkStore;
   } = {},
@@ -276,17 +290,31 @@ export function listCoordination(
     : options.project
       ? workStore.list(options.project)
       : [];
-  const processes = options.processes
-    ? { processes: options.processes, reliable: true }
-    : scanProcesses(
-        [...workRecords, ...claimRecords]
-          .map((record) => record.owner)
-          .filter((owner) => !owner.sessionId && owner.pid !== undefined)
-          .map((owner) => owner.pid as number),
-      );
+  const ownerPids = [...workRecords, ...claimRecords]
+    .map((record) => record.owner)
+    .filter((owner) => !owner.sessionId && owner.pid !== undefined)
+    .map((owner) => owner.pid as number);
+  const processes =
+    options.processes instanceof Map
+      ? { processes: options.processes, reliable: true }
+      : (options.processes ?? coordinationProcessEvidence(ownerPids));
   return [
-    ...workRecords.map((lease) => workEntry(lease, registrations, processes)),
-    ...claimRecords.map((claim) => claimEntry(claim, registrations, processes)),
+    ...workRecords.map((lease) =>
+      workEntry(
+        lease,
+        registrations,
+        processes,
+        options.registrationsReliable ?? true,
+      ),
+    ),
+    ...claimRecords.map((claim) =>
+      claimEntry(
+        claim,
+        registrations,
+        processes,
+        options.registrationsReliable ?? true,
+      ),
+    ),
   ].sort(
     (a, b) =>
       a.project.localeCompare(b.project) ||
@@ -310,6 +338,20 @@ export function describeCoordination(entry: CoordinationEntry): string {
     ? `; last seen ${entry.ownerLastSeen}`
     : "";
   return `${entry.id} ${entry.projectLabel}/${entry.resourceType}:${entry.resourceLabel} — ${entry.owner.label} (${identity})${state}${activity} [${entry.condition}] [owner ${entry.ownerStatus}${lastSeen}] [updated ${entry.updatedAt}]`;
+}
+
+/** Actionable conflict guidance without weakening ownership safeguards. */
+export function coordinationConflictAdvice(entry: CoordinationEntry): string {
+  if (entry.ownerStatus === "offline") {
+    return `owner is offline; retry acquisition or run agent-mail coordination recover --id ${entry.id}`;
+  }
+  if (entry.ownerStatus === "unverifiable") {
+    return `owner liveness is unverifiable in this sandbox; inspect from a normal terminal, then run agent-mail coordination recover --id ${entry.id} if it reports owner-offline`;
+  }
+  if (entry.ownerStatus === "manual") {
+    return "owner is deliberately manual; ask the operator to release it";
+  }
+  return "owner is live; use request_coordination_transfer for an auditable handoff";
 }
 
 export function recoverCoordination(
