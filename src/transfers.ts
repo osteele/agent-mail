@@ -7,12 +7,11 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
-  rmdirSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import { withFileLock } from "./lock.ts";
 import { TRANSFERS_DIR, canonicalProject } from "./paths.ts";
 import { appendMessage } from "./spool.ts";
 import {
@@ -40,6 +39,7 @@ export interface WorkTransferRequest {
   resourceKey: string;
   expectedOwner: WorkOwner;
   expectedUpdatedAt: string;
+  expectedRevision: number;
   requester: WorkOwner;
   reason?: string;
   createdAt: string;
@@ -127,43 +127,7 @@ export class TransferStore {
   }
 
   private withLock<T>(key: string, fn: () => T): T {
-    mkdirSync(this.root, { recursive: true });
-    const lock = this.lockPath(key);
-    const deadline = Date.now() + 2_000;
-    while (true) {
-      try {
-        mkdirSync(lock);
-        break;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-        let mtime: number;
-        try {
-          mtime = statSync(lock).mtimeMs;
-        } catch (statError) {
-          if ((statError as NodeJS.ErrnoException).code === "ENOENT") continue;
-          throw statError;
-        }
-        if (Date.now() - mtime > 30_000) {
-          try {
-            rmdirSync(lock);
-          } catch (removeError) {
-            if ((removeError as NodeJS.ErrnoException).code !== "ENOENT") {
-              throw removeError;
-            }
-          }
-          continue;
-        }
-        if (Date.now() >= deadline) {
-          throw new Error(`timed out waiting for transfer lock ${key}`);
-        }
-        Bun.sleepSync(10);
-      }
-    }
-    try {
-      return fn();
-    } finally {
-      rmdirSync(lock);
-    }
+    return withFileLock(this.lockPath(key), fn);
   }
 
   private write(request: WorkTransferRequest): void {
@@ -257,6 +221,7 @@ export class TransferStore {
         resourceKey: lease.resource.key,
         expectedOwner: lease.owner,
         expectedUpdatedAt: lease.updatedAt,
+        expectedRevision: lease.revision ?? 0,
         requester,
         ...(reason ? { reason } : {}),
         createdAt,
@@ -336,11 +301,16 @@ export class TransferStore {
   ): TransferChange {
     const validatedResponse = validateText(response, "transfer response");
     try {
+      if (request.expectedRevision === undefined) {
+        throw new WorkTransferSupersededError(
+          `transfer request ${request.id} predates revision CAS`,
+        );
+      }
       const lease = this.workStore.transfer(
         request.project,
         request.coordinationId,
         request.expectedOwner,
-        request.expectedUpdatedAt,
+        request.expectedRevision,
         request.requester,
       );
       const transition = transferTransition(request.status, {

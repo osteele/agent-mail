@@ -142,3 +142,22 @@ test("a response after the deadline resolves as timeout", () => {
   expect(result.request.status).toBe("timed-out");
   expect(workStore.list(project)[0].owner).toEqual(requester);
 });
+
+test("transfer requests capture and CAS on lease revision", () => {
+  const { project, workStore, transferStore } = fixture();
+  const lease = workStore.acquire(
+    project,
+    { type: "research-plan", key: "plan" },
+    holder,
+  );
+  const request = transferStore.request(lease, requester, {
+    timeoutSeconds: 5,
+  }).request;
+  expect(request.expectedRevision).toBe(lease.revision);
+
+  workStore.update(project, lease.id, holder, { activity: "changed" });
+  expect(
+    transferStore.settleExpired(Date.parse(request.deadline) + 1)[0].status,
+  ).toBe("superseded");
+  expect(workStore.list(project)[0].owner).toEqual(holder);
+});

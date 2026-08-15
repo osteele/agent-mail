@@ -9,7 +9,12 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { projectSlug } from "./paths.ts";
-import { WorkConflictError, type WorkOwner, WorkStore } from "./work.ts";
+import {
+  WorkConflictError,
+  type WorkOwner,
+  WorkStore,
+  WorkTransferSupersededError,
+} from "./work.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -158,6 +163,7 @@ test("takeover checks every duplicate record left by an interruption", () => {
       state: "working",
       createdAt: "2026-08-13T10:00:00.000Z",
       updatedAt: "2026-08-13T10:00:00.000Z",
+      revision: 1,
     },
     {
       version: 1,
@@ -168,6 +174,7 @@ test("takeover checks every duplicate record left by an interruption", () => {
       state: "working",
       createdAt: "2026-08-13T10:01:00.000Z",
       updatedAt: "2026-08-13T10:01:00.000Z",
+      revision: 1,
     },
   ];
   for (const record of records) {
@@ -208,6 +215,62 @@ test("only the owner can update or release a work lease", () => {
     "only its owner can release it",
   );
   expect(store.release(project, lease.id, ownerA.id)).toEqual(waiting);
+});
+
+test("leases carry a monotonic revision counter", () => {
+  const { project, store } = fixture();
+  const lease = store.acquire(
+    project,
+    { type: "research-plan", key: "2026-08-12-pilot" },
+    ownerA,
+  );
+  expect(lease.revision).toBe(1);
+
+  const updated = store.update(project, lease.id, ownerA.id, {
+    state: "waiting",
+  });
+  expect(updated.revision).toBe(2);
+
+  const same = store.acquire(
+    project,
+    { type: "research-plan", key: "2026-08-12-pilot" },
+    ownerA,
+  );
+  expect(same.revision).toBe(3);
+  expect(same.state).toBe("waiting");
+});
+
+test("transfer CAS uses revision, not updatedAt", () => {
+  const { project, workRoot, store } = fixture();
+  const canonical = realpathSync(project);
+  const directory = join(workRoot, projectSlug(canonical));
+  mkdirSync(directory, { recursive: true });
+  const resource = { type: "task", key: "aba" };
+
+  // Simulate a lease that has been updated twice within the same millisecond:
+  // the updatedAt string is unchanged from the original, but revision advanced.
+  const lease = {
+    version: 1 as const,
+    id: "aba-lease",
+    project: canonical,
+    resource,
+    owner: ownerA,
+    state: "working",
+    createdAt: "2026-08-13T10:00:00.000Z",
+    updatedAt: "2026-08-13T10:00:00.000Z",
+    revision: 3,
+  };
+  writeFileSync(join(directory, `${lease.id}.json`), JSON.stringify(lease));
+
+  // A transfer requested against revision 1 must fail even though the
+  // updatedAt string still matches what revision 1 had.
+  expect(() => store.transfer(project, lease.id, ownerA, 1, ownerB)).toThrow(
+    WorkTransferSupersededError,
+  );
+
+  // A transfer against the current revision succeeds.
+  const transferred = store.transfer(project, lease.id, ownerA, 3, ownerB);
+  expect(transferred.owner).toEqual(ownerB);
 });
 
 test("listAll and releaseOwner span independent projects", () => {

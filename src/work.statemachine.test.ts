@@ -310,7 +310,7 @@ class RequestTransferCommand implements fc.Command<WorkModel, WorkReal> {
         request.coordinationId === lease.id &&
         request.requester.id === requester.id &&
         request.expectedOwner.id === lease.owner.id &&
-        request.expectedUpdatedAt === lease.updatedAt,
+        request.expectedRevision === lease.revision,
     );
 
     const result = r.transferStore.request(lease, requester, {
@@ -380,7 +380,7 @@ class RespondTransferCommand implements fc.Command<WorkModel, WorkReal> {
       (this.payload.decision === "accept" || this.payload.expired) &&
       lease !== undefined &&
       lease.owner.id === request.expectedOwner.id &&
-      lease.updatedAt === request.expectedUpdatedAt;
+      lease.revision === request.expectedRevision;
 
     const result = r.transferStore.respond(
       request.id,

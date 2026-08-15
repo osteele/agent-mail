@@ -8,12 +8,12 @@ import {
   readdirSync,
   realpathSync,
   renameSync,
-  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { type LockOwner, withFileLock } from "./lock.ts";
 import { CLAIMS_DIR, canonicalProject, projectSlug } from "./paths.ts";
 
 export interface ClaimOwner {
@@ -160,63 +160,8 @@ export class ClaimStore {
     return join(this.root, `${projectSlug(project)}.lock`);
   }
 
-  private withLock<T>(project: string, fn: () => T): T {
-    mkdirSync(this.root, { recursive: true });
-    const lock = this.lockPath(project);
-    const deadline = Date.now() + 2_000;
-    while (true) {
-      try {
-        mkdirSync(lock);
-        break;
-      } catch (error) {
-        if (
-          !(error instanceof Error) ||
-          !("code" in error) ||
-          error.code !== "EEXIST"
-        ) {
-          throw error;
-        }
-        // A process can die between mkdir and rmdir. Claim mutations are tiny,
-        // synchronous transactions, so an old lock directory is an abandoned
-        // mutex rather than evidence of work still in progress.
-        let lockMtime: number;
-        try {
-          lockMtime = statSync(lock).mtimeMs;
-        } catch (statError) {
-          if (
-            statError instanceof Error &&
-            "code" in statError &&
-            statError.code === "ENOENT"
-          ) {
-            continue;
-          }
-          throw statError;
-        }
-        if (Date.now() - lockMtime > 30_000) {
-          try {
-            rmdirSync(lock);
-          } catch (removeError) {
-            if (
-              !(removeError instanceof Error) ||
-              !("code" in removeError) ||
-              removeError.code !== "ENOENT"
-            ) {
-              throw removeError;
-            }
-          }
-          continue;
-        }
-        if (Date.now() >= deadline) {
-          throw new Error(`timed out waiting for claim lock for ${project}`);
-        }
-        Bun.sleepSync(10);
-      }
-    }
-    try {
-      return fn();
-    } finally {
-      rmdirSync(lock);
-    }
+  private withLock<T>(project: string, fn: () => T, owner?: LockOwner): T {
+    return withFileLock(this.lockPath(project), fn, { owner });
   }
 
   list(project: string): Claim[] {
@@ -229,7 +174,10 @@ export class ClaimStore {
     return readdirSync(dir)
       .filter((name) => name.endsWith(".json"))
       .map((name) => JSON.parse(readFileSync(join(dir, name), "utf8")) as Claim)
-      .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      .sort(
+        (a, b) =>
+          a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
+      );
   }
 
   listAll(): Claim[] {
@@ -314,48 +262,54 @@ export class ClaimStore {
       seen.set(path, target.pathType);
       canonicalTargets.push({ path, pathType: target.pathType });
     }
-    return this.withLock(canonical, () => {
-      const staleClaims: Claim[] = [];
-      for (const claim of this.list(canonical)) {
-        if (claim.type !== "path") continue;
-        let conflictingPath: string | undefined;
-        for (const existing of pathClaimTargets(claim)) {
-          const requested = canonicalTargets.find((target) =>
-            pathsConflict(existing, target.path, target.pathType),
-          );
-          if (requested) {
-            conflictingPath = existing.path;
-            break;
+    return this.withLock(
+      canonical,
+      () => {
+        const staleClaims: Claim[] = [];
+        for (const claim of this.list(canonical)) {
+          if (claim.type !== "path") continue;
+          let conflictingPath: string | undefined;
+          for (const existing of pathClaimTargets(claim)) {
+            const requested = canonicalTargets.find((target) =>
+              pathsConflict(existing, target.path, target.pathType),
+            );
+            if (requested) {
+              conflictingPath = existing.path;
+              break;
+            }
           }
+          if (!conflictingPath) continue;
+          if (!options.ownerIsLive || options.ownerIsLive(claim.owner, claim)) {
+            throw new ClaimConflictError(claim, conflictingPath);
+          }
+          staleClaims.push(claim);
         }
-        if (!conflictingPath) continue;
-        if (!options.ownerIsLive || options.ownerIsLive(claim.owner, claim)) {
-          throw new ClaimConflictError(claim, conflictingPath);
+        const claim: PathClaim = {
+          id: randomUUID(),
+          type: "path",
+          project: canonical,
+          paths: canonicalTargets,
+          path:
+            canonicalTargets.length === 1
+              ? canonicalTargets[0].path
+              : canonical,
+          pathType:
+            canonicalTargets.length === 1
+              ? canonicalTargets[0].pathType
+              : "directory",
+          owner,
+          createdAt: new Date().toISOString(),
+        };
+        this.write(claim);
+        // Publishing first makes interruption conservative: a crash can leave
+        // duplicate blockers, but never an unowned gap in the edit set.
+        for (const stale of staleClaims) {
+          unlinkSync(join(this.projectDir(canonical), `${stale.id}.json`));
         }
-        staleClaims.push(claim);
-      }
-      const claim: PathClaim = {
-        id: randomUUID(),
-        type: "path",
-        project: canonical,
-        paths: canonicalTargets,
-        path:
-          canonicalTargets.length === 1 ? canonicalTargets[0].path : canonical,
-        pathType:
-          canonicalTargets.length === 1
-            ? canonicalTargets[0].pathType
-            : "directory",
-        owner,
-        createdAt: new Date().toISOString(),
-      };
-      this.write(claim);
-      // Publishing first makes interruption conservative: a crash can leave
-      // duplicate blockers, but never an unowned gap in the edit set.
-      for (const stale of staleClaims) {
-        unlinkSync(join(this.projectDir(canonical), `${stale.id}.json`));
-      }
-      return claim;
-    });
+        return claim;
+      },
+      owner,
+    );
   }
 
   claimExperiment(
@@ -374,33 +328,39 @@ export class ClaimStore {
     if (!existsSync(experiments) || !statSync(experiments).isDirectory()) {
       throw new Error(`experiments directory does not exist: ${experiments}`);
     }
-    return this.withLock(canonical, () => {
-      const fileNumbers = readdirSync(experiments, { withFileTypes: true })
-        .filter((entry) => entry.isFile())
-        .map((entry) => /^EXP-(\d+)(?:\.md|-[^/]+\.md)$/.exec(entry.name)?.[1])
-        .filter((value): value is string => value !== undefined)
-        .map(Number);
-      const claimedNumbers = this.list(canonical)
-        .filter(
-          (claim): claim is ExperimentClaim =>
-            claim.type === "experiment" && claim.notebook === notebookPath,
-        )
-        .map((claim) => claim.number);
-      const number = Math.max(0, ...fileNumbers, ...claimedNumbers) + 1;
-      const experimentId = `EXP-${String(number).padStart(3, "0")}`;
-      const claim: ExperimentClaim = {
-        id: randomUUID(),
-        type: "experiment",
-        project: canonical,
-        notebook: notebookPath,
-        experimentId,
-        number,
-        owner,
-        createdAt: new Date().toISOString(),
-      };
-      this.write(claim);
-      return claim;
-    });
+    return this.withLock(
+      canonical,
+      () => {
+        const fileNumbers = readdirSync(experiments, { withFileTypes: true })
+          .filter((entry) => entry.isFile())
+          .map(
+            (entry) => /^EXP-(\d+)(?:\.md|-[^/]+\.md)$/.exec(entry.name)?.[1],
+          )
+          .filter((value): value is string => value !== undefined)
+          .map(Number);
+        const claimedNumbers = this.list(canonical)
+          .filter(
+            (claim): claim is ExperimentClaim =>
+              claim.type === "experiment" && claim.notebook === notebookPath,
+          )
+          .map((claim) => claim.number);
+        const number = Math.max(0, ...fileNumbers, ...claimedNumbers) + 1;
+        const experimentId = `EXP-${String(number).padStart(3, "0")}`;
+        const claim: ExperimentClaim = {
+          id: randomUUID(),
+          type: "experiment",
+          project: canonical,
+          notebook: notebookPath,
+          experimentId,
+          number,
+          owner,
+          createdAt: new Date().toISOString(),
+        };
+        this.write(claim);
+        return claim;
+      },
+      owner,
+    );
   }
 
   release(
@@ -409,17 +369,21 @@ export class ClaimStore {
     owner?: string | ClaimOwner,
   ): Claim {
     const canonical = canonicalProject(project);
-    return this.withLock(canonical, () => {
-      const claim = this.list(canonical).find((item) => item.id === claimId);
-      if (!claim) throw new Error(`claim not found: ${claimId}`);
-      if (owner && !ownerMatches(claim.owner, owner)) {
-        throw new Error(
-          `claim ${claimId} belongs to ${claim.owner.label}; only its owner can release it`,
-        );
-      }
-      unlinkSync(join(this.projectDir(canonical), `${claim.id}.json`));
-      return claim;
-    });
+    return this.withLock(
+      canonical,
+      () => {
+        const claim = this.list(canonical).find((item) => item.id === claimId);
+        if (!claim) throw new Error(`claim not found: ${claimId}`);
+        if (owner && !ownerMatches(claim.owner, owner)) {
+          throw new Error(
+            `claim ${claimId} belongs to ${claim.owner.label}; only its owner can release it`,
+          );
+        }
+        unlinkSync(join(this.projectDir(canonical), `${claim.id}.json`));
+        return claim;
+      },
+      typeof owner === "object" ? owner : undefined,
+    );
   }
 
   recover(
