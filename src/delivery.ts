@@ -66,6 +66,52 @@ export interface DeliverDecision {
   overflowHeldId?: string;
 }
 
+/** Events that drive a single delivery receipt through its lifecycle. */
+export type ReceiptEvent =
+  | { type: "deliver"; action: DeliverAction }
+  | { type: "settle"; action: SettleAction };
+
+/** Pure transition table for a delivery receipt. Terminal states are absorbing:
+ *  once a receipt reaches `pushed`, `read`, `refused`, or `expired` it never
+ *  changes again. */
+export function receiptTransition(
+  currentStatus: ReceiptStatus,
+  event: ReceiptEvent,
+): ReceiptStatus {
+  switch (currentStatus) {
+    case "spooled":
+      if (event.type === "deliver") {
+        switch (event.action.type) {
+          case "skip":
+            return "spooled";
+          case "expired":
+            return "expired";
+          case "refuse":
+            return "refused";
+          case "hold":
+            return "held";
+          case "push":
+            return "pushed";
+        }
+      }
+      break;
+    case "held":
+      if (event.type === "settle") {
+        switch (event.action.type) {
+          case "push":
+            return "pushed";
+          case "expired":
+            return "expired";
+          case "refuse":
+            return "refused";
+        }
+      }
+      break;
+    // `pushed`, `read`, `refused`, and `expired` are terminal.
+  }
+  return currentStatus;
+}
+
 /** Decide the delivery action for a newly spooled message destined to one
  * session. Mirrors the per-message logic in `poll()` from `channel.ts`. */
 export function decideNewMessageDelivery(
@@ -144,44 +190,29 @@ export function deliverNewMessage(
     next = addReceipt(next, project, {
       messageId: overflowHeldId,
       ts: receiptTs(nowMs),
-      status: "refused",
+      status: receiptTransition("held", {
+        type: "settle",
+        action: {
+          type: "refuse",
+          messageId: overflowHeldId,
+          detail: "held queue full",
+        },
+      }),
       sessionId,
       detail: "held queue full",
     });
   }
-  switch (action.type) {
-    case "skip":
-      return next;
-    case "expired":
-      return addReceipt(next, project, {
-        messageId: msg.id,
-        ts: receiptTs(nowMs),
-        status: "expired",
-        sessionId,
-      });
-    case "refuse":
-      return addReceipt(next, project, {
-        messageId: msg.id,
-        ts: receiptTs(nowMs),
-        status: "refused",
-        sessionId,
-        detail: action.detail,
-      });
-    case "hold":
-      return addReceipt(next, project, {
-        messageId: msg.id,
-        ts: receiptTs(nowMs),
-        status: "held",
-        sessionId,
-      });
-    case "push":
-      return addReceipt(next, project, {
-        messageId: msg.id,
-        ts: receiptTs(nowMs),
-        status: "pushed",
-        sessionId,
-      });
+  const nextStatus = receiptTransition("spooled", { type: "deliver", action });
+  if (action.type === "skip") {
+    return next;
   }
+  return addReceipt(next, project, {
+    messageId: msg.id,
+    ts: receiptTs(nowMs),
+    status: nextStatus,
+    sessionId,
+    ...(action.type === "refuse" ? { detail: action.detail } : {}),
+  });
 }
 
 export type SettleAction =
@@ -247,33 +278,15 @@ export function settleHeldMessages(
   );
   let next = receipts;
   for (const action of actions) {
-    switch (action.type) {
-      case "push":
-        next = addReceipt(next, project, {
-          messageId: action.messageId,
-          ts: receiptTs(nowMs),
-          status: "pushed",
-          sessionId,
-        });
-        break;
-      case "expired":
-        next = addReceipt(next, project, {
-          messageId: action.messageId,
-          ts: receiptTs(nowMs),
-          status: "expired",
-          sessionId,
-        });
-        break;
-      case "refuse":
-        next = addReceipt(next, project, {
-          messageId: action.messageId,
-          ts: receiptTs(nowMs),
-          status: "refused",
-          sessionId,
-          detail: action.detail,
-        });
-        break;
-    }
+    const nextStatus = receiptTransition("held", { type: "settle", action });
+    if (nextStatus === "held") continue;
+    next = addReceipt(next, project, {
+      messageId: action.messageId,
+      ts: receiptTs(nowMs),
+      status: nextStatus,
+      sessionId,
+      ...(action.type === "refuse" ? { detail: action.detail } : {}),
+    });
   }
   return next;
 }

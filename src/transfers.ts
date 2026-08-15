@@ -57,6 +57,48 @@ export interface TransferChange {
   changed: boolean;
 }
 
+/** Events that drive a work-transfer request through its lifecycle. */
+export type TransferTransitionEvent =
+  | { type: "decline"; response?: string }
+  | {
+      type: "settle";
+      status: "accepted" | "timed-out";
+      response?: string;
+      result:
+        | { kind: "transferred"; owner: WorkOwner }
+        | { kind: "superseded"; actualOwner?: WorkOwner; reason: string };
+    };
+
+/** Pure transition table for a work-transfer request. Terminal states
+ *  (`accepted`, `declined`, `timed-out`, `superseded`) are absorbing. */
+export function transferTransition(
+  currentStatus: TransferStatus,
+  event: TransferTransitionEvent,
+): {
+  status: TransferStatus;
+  response?: string;
+  actualOwner?: WorkOwner;
+} | null {
+  if (currentStatus !== "requested") return null;
+  switch (event.type) {
+    case "decline":
+      return { status: "declined", response: event.response };
+    case "settle":
+      if (event.result.kind === "transferred") {
+        return {
+          status: event.status,
+          response: event.response,
+          actualOwner: event.result.owner,
+        };
+      }
+      return {
+        status: "superseded",
+        response: event.result.reason,
+        actualOwner: event.result.actualOwner,
+      };
+  }
+}
+
 function validateText(
   value: string | undefined,
   name: string,
@@ -251,12 +293,15 @@ export class TransferStore {
       }
       if (decision === "decline") {
         const validatedResponse = validateText(response, "transfer response");
+        const transition = transferTransition(request.status, {
+          type: "decline",
+          response: validatedResponse,
+        });
+        if (!transition) return { request, changed: false };
         const declined: WorkTransferRequest = {
           ...request,
-          status: "declined",
+          ...transition,
           resolvedAt: new Date().toISOString(),
-          ...(validatedResponse ? { response: validatedResponse } : {}),
-          actualOwner: request.expectedOwner,
         };
         this.write(declined);
         return { request: declined, changed: true };
@@ -298,26 +343,39 @@ export class TransferStore {
         request.expectedUpdatedAt,
         request.requester,
       );
+      const transition = transferTransition(request.status, {
+        type: "settle",
+        status,
+        response: validatedResponse,
+        result: { kind: "transferred", owner: lease.owner },
+      });
+      if (!transition) return { request, changed: false };
       const settled: WorkTransferRequest = {
         ...request,
-        status,
+        ...transition,
         resolvedAt: new Date().toISOString(),
-        ...(validatedResponse ? { response: validatedResponse } : {}),
-        actualOwner: lease.owner,
       };
       this.write(settled);
       return { request: settled, changed: true };
     } catch (error) {
       if (!(error instanceof WorkTransferSupersededError)) throw error;
-      const actual = this.workStore
+      const actualOwner = this.workStore
         .list(request.project)
         .find((lease) => lease.id === request.coordinationId)?.owner;
+      const transition = transferTransition(request.status, {
+        type: "settle",
+        status,
+        result: {
+          kind: "superseded",
+          actualOwner,
+          reason: error instanceof Error ? error.message : String(error),
+        },
+      });
+      if (!transition) return { request, changed: false };
       const superseded: WorkTransferRequest = {
         ...request,
-        status: "superseded",
+        ...transition,
         resolvedAt: new Date().toISOString(),
-        response: error instanceof Error ? error.message : String(error),
-        ...(actual ? { actualOwner: actual } : {}),
       };
       this.write(superseded);
       return { request: superseded, changed: true };
