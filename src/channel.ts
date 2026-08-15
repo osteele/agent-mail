@@ -44,6 +44,12 @@ import {
   recoverCoordination,
 } from "./coordination.ts";
 import {
+  decideHeldSettlements,
+  decideNewMessageDelivery,
+  pendingHeldIds,
+  settled,
+} from "./delivery.ts";
+import {
   canonicalProject,
   displayName,
   ensureDirs,
@@ -855,9 +861,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     });
     const receipts = readReceipts(cwd);
     if (policy === "hold") {
-      const pending = pendingHeldIds(receipts);
+      const pending = pendingHeldIds(receipts, sessionId);
       for (const msg of messages) {
-        if (settled(receipts, msg.id) || pending.includes(msg.id)) continue;
+        if (settled(receipts, msg.id, sessionId) || pending.includes(msg.id))
+          continue;
         if (pending.length >= config.heldMessageLimit) {
           const refused = pending.shift();
           if (refused) {
@@ -878,14 +885,14 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
     }
     if (policy === "refuse") {
       for (const msg of messages) {
-        if (!settled(receipts, msg.id)) {
+        if (!settled(receipts, msg.id, sessionId)) {
           recordReceipt(receipts, msg.id, "refused", "policy");
         }
       }
       messages = [];
     } else {
       for (const msg of messages) {
-        if (!settled(receipts, msg.id)) {
+        if (!settled(receipts, msg.id, sessionId)) {
           recordReceipt(receipts, msg.id, "pushed", "inbox pull");
         }
       }
@@ -1347,17 +1354,6 @@ register(
 // --- Spool watcher: push lines appended after startup -----------------------
 let offset = existsSync(mySpool) ? statSync(mySpool).size : 0;
 
-const TERMINAL_RECEIPTS = ["pushed", "read", "refused", "expired"] as const;
-
-function isTerminalReceipt(status: DeliveryReceipt["status"]): boolean {
-  return (
-    status === "pushed" ||
-    status === "read" ||
-    status === "refused" ||
-    status === "expired"
-  );
-}
-
 function recordReceipt(
   receipts: DeliveryReceipt[],
   messageId: string,
@@ -1374,25 +1370,6 @@ function recordReceipt(
   };
   appendReceipt(cwd, receipt);
   receipts.push(receipt);
-}
-
-function settled(receipts: DeliveryReceipt[], messageId: string): boolean {
-  return hasReceipt(receipts, messageId, sessionId, [...TERMINAL_RECEIPTS]);
-}
-
-function pendingHeldIds(receipts: DeliveryReceipt[]): string[] {
-  const held: string[] = [];
-  for (const receipt of receipts) {
-    if (receipt.sessionId !== sessionId) continue;
-    if (receipt.status === "held" && !held.includes(receipt.messageId)) {
-      held.push(receipt.messageId);
-    }
-    if (isTerminalReceipt(receipt.status)) {
-      const index = held.indexOf(receipt.messageId);
-      if (index >= 0) held.splice(index, 1);
-    }
-  }
-  return held;
 }
 
 async function pushMessage(
@@ -1419,23 +1396,26 @@ async function settleHeld(
   policy: InboundPolicy,
   receipts: DeliveryReceipt[],
 ): Promise<void> {
-  const ids = pendingHeldIds(receipts);
-  if (ids.length === 0 || policy === "hold") return;
-  if (policy === "refuse") {
-    for (const id of ids) recordReceipt(receipts, id, "refused", "policy");
-    return;
-  }
-  if (!sessionCapabilities().channelPush) return;
   const byId = new Map(
     readMessages(cwd, { limit: 0 }).map((msg) => [msg.id, msg]),
   );
-  for (const id of ids) {
-    const msg = byId.get(id);
-    if (!msg || settled(receipts, id)) continue;
-    if (isExpired(msg)) {
-      recordReceipt(receipts, id, "expired");
-    } else if (messageVisibleToSession(msg, sessionId)) {
-      await pushMessage(msg, receipts);
+  const actions = decideHeldSettlements(
+    sessionId,
+    policy,
+    isMuted(cwd, process.pid),
+    sessionCapabilities().channelPush,
+    byId,
+    receipts,
+    Date.now(),
+  );
+  for (const action of actions) {
+    if (action.type === "push") {
+      const msg = byId.get(action.messageId);
+      if (msg) await pushMessage(msg as Message & { id: string }, receipts);
+    } else if (action.type === "expired") {
+      recordReceipt(receipts, action.messageId, "expired");
+    } else if (action.type === "refuse") {
+      recordReceipt(receipts, action.messageId, "refused", action.detail);
     }
   }
 }
@@ -1460,27 +1440,35 @@ async function poll(): Promise<void> {
       continue;
     }
     if (!msg.id || msg.delivery === "audit") continue;
-    if (settled(receipts, msg.id)) continue;
-    if (isExpired(msg)) {
-      recordReceipt(receipts, msg.id, "expired");
-      continue;
+    const { action, overflowHeldId } = decideNewMessageDelivery(
+      msg as Message & { id: string },
+      sessionId,
+      policy,
+      isMuted(cwd, process.pid),
+      sessionCapabilities().channelPush,
+      config.heldMessageLimit,
+      receipts,
+      Date.now(),
+    );
+    if (overflowHeldId) {
+      recordReceipt(receipts, overflowHeldId, "refused", "held queue full");
     }
-    // Skip our own mail: same directory shares one spool, so a message we sent
-    // to this project would otherwise be pushed back into our own session.
-    if (!messageVisibleToSession(msg, sessionId)) continue;
-    if (policy === "refuse") {
-      recordReceipt(receipts, msg.id, "refused", "policy");
-      continue;
+    switch (action.type) {
+      case "skip":
+        continue;
+      case "expired":
+        recordReceipt(receipts, msg.id, "expired");
+        continue;
+      case "refuse":
+        recordReceipt(receipts, msg.id, "refused", action.detail);
+        continue;
+      case "hold":
+        recordReceipt(receipts, msg.id, "held");
+        continue;
+      case "push":
+        await pushMessage(msg as Message & { id: string }, receipts);
+        continue;
     }
-    if (policy === "hold") {
-      const pending = pendingHeldIds(receipts);
-      if (pending.length >= config.heldMessageLimit) {
-        recordReceipt(receipts, pending[0], "refused", "held queue full");
-      }
-      recordReceipt(receipts, msg.id, "held");
-      continue;
-    }
-    await pushMessage(msg as Message & { id: string }, receipts);
   }
   offset = size;
 }

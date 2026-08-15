@@ -117,7 +117,7 @@ function ownerMatches(
     : sameOwnerProcess(owner, credential);
 }
 
-function canonicalPath(path: string): string {
+export function canonicalPath(path: string): string {
   const absolute = resolve(path);
   if (existsSync(absolute)) return realpathSync(absolute);
 
