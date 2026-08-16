@@ -2,7 +2,7 @@
 /** agent-mail CLI.
  *
  * Messaging:
- *   agent-mail notify --project <dir> --message <text> [--from <label>] [--no-slack]
+ *   agent-mail notify --project <dir> --message <text> [--from <label>] [--session <name-or-id>] [--no-slack]
  *   agent-mail inbox [--project <dir>] [--limit N] [--unread]
  *   agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
  *   agent-mail listeners [--project <dir>] [--json] [--no-sync]
@@ -16,7 +16,7 @@
  *   agent-mail work update --id <work-id> [--state working|waiting]
  *   agent-mail work release --id <work-id> [--project <dir>]
  *   agent-mail coordination list [--project <dir> | --all]
- *   agent-mail coordination recover --id <coordination-id>
+ *   agent-mail coordination recover --id <coordination-id> [--authority <text>]
  *
  * Dashboards:
  *   agent-mail dashboard [--port N] [--open] [--no-tui]
@@ -92,6 +92,8 @@ import {
   activityTag,
   claudeSessions,
   lastActivityMs,
+  resolveSessionQuery,
+  sessionIdFromEnv,
   sessionNames,
 } from "./sessions.ts";
 import {
@@ -383,6 +385,48 @@ function resolveProjectArg(arg: string): string {
   process.exit(1);
 }
 
+/** Resolve `notify --session` to a single live session, or explain why not.
+ *
+ * Unlike send_mail, an unresolvable name is not an error here. The caller is an
+ * automation reporting a finished job, and its addressee is a session that may
+ * well have exited while the job ran; refusing would drop the notification
+ * entirely, which is strictly worse than the project broadcast this replaces.
+ * So an unknown or ambiguous name degrades to a broadcast and says so. */
+function resolveNotifySession(
+  project: string,
+  session: string,
+):
+  | { kind: "session"; sessionId: string; label: string }
+  | { kind: "broadcast"; reason: string } {
+  const meta = claudeSessions();
+  const candidates = listLive()
+    .filter((r) => r.sessionId && canonicalProject(r.cwd) === project)
+    .map((r) => {
+      const sid = r.sessionId as string;
+      const names = sessionNames(sid, meta.get(sid), project);
+      return {
+        sessionId: sid,
+        fullName: names.fullName,
+        displayName: names.displayName,
+      };
+    });
+  const resolved = resolveSessionQuery(candidates, session);
+  if (resolved.kind === "unique") {
+    return {
+      kind: "session",
+      sessionId: resolved.session.sessionId,
+      label: resolved.session.displayName,
+    };
+  }
+  return {
+    kind: "broadcast",
+    reason:
+      resolved.kind === "none"
+        ? `no live session "${session}" in ${project}`
+        : `"${session}" matches ${resolved.matches.length} live sessions`,
+  };
+}
+
 async function cmdNotify(
   flags: Record<string, string | boolean>,
 ): Promise<void> {
@@ -390,7 +434,7 @@ async function cmdNotify(
   const message = flags.message;
   if (typeof project !== "string" || typeof message !== "string") {
     console.error(
-      "usage: agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to <id>] [--idempotency-key <key>] [--ttl <seconds>] [--no-slack]",
+      "usage: agent-mail notify --project <dir> --message <text> [--from <label>] [--session <name-or-id>] [--reply-to <id>] [--idempotency-key <key>] [--ttl <seconds>] [--no-slack]",
     );
     process.exit(1);
   }
@@ -413,6 +457,19 @@ async function cmdNotify(
   }
   const from = typeof flags.from === "string" ? flags.from : "cli";
   const suppressSlack = flags["no-slack"] === true;
+  // An addressed message is hidden from every other session in the project
+  // (spool.ts `messageVisibleToSession`), so resolving here is the whole of
+  // the fan-out fix — no delivery-path change is needed.
+  let toSession: string | undefined;
+  if (typeof flags.session === "string" && flags.session !== "") {
+    const resolved = resolveNotifySession(resolvedProject, flags.session);
+    if (resolved.kind === "session") {
+      toSession = resolved.sessionId;
+    } else {
+      console.error(`broadcasting to the project: ${resolved.reason}`);
+    }
+  }
+  const meta = toSession ? { toSession } : undefined;
   const body = JSON.stringify({
     project: resolvedProject,
     message,
@@ -422,6 +479,7 @@ async function cmdNotify(
       transport: "cli",
       authority: "untrusted",
     },
+    ...(meta ? { meta } : {}),
     ...(idempotencyKey ? { idempotencyKey } : {}),
     ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
     ...(replyTo ? { replyTo } : {}),
@@ -458,6 +516,7 @@ async function cmdNotify(
           transport: "cli",
           authority: "untrusted",
         },
+        ...(meta ? { meta } : {}),
         ...(idempotencyKey ? { idempotencyKey } : {}),
         ...(ttlSeconds !== undefined
           ? {
@@ -649,7 +708,7 @@ async function cmdStatusLine(
     const sessionId =
       typeof flags.session === "string"
         ? flags.session
-        : (payload?.session_id ?? process.env.CLAUDE_CODE_SESSION_ID);
+        : (payload?.session_id ?? sessionIdFromEnv());
     const sessions = liveInProject(project);
     const names = claudeSessions();
     const name = statusLineName(
@@ -687,8 +746,7 @@ function cliOwner(
   project: string,
 ): ClaimOwner {
   const label = typeof flags.owner === "string" ? flags.owner : undefined;
-  const sessionId =
-    process.env.CLAUDE_CODE_SESSION_ID ?? process.env.CODEX_THREAD_ID;
+  const sessionId = sessionIdFromEnv();
   if (sessionId) {
     const registration = listLive().find(
       (entry) =>
@@ -864,12 +922,19 @@ function cmdCoordination(
   if (subcommand === "recover") {
     if (typeof flags.id !== "string") {
       throw new Error(
-        "usage: agent-mail coordination recover --id <coordination-id>",
+        "usage: agent-mail coordination recover --id <coordination-id> [--authority <text>]",
       );
     }
-    const entry = recoverCoordination(flags.id);
+    const authority =
+      typeof flags.authority === "string" ? flags.authority : undefined;
+    const entry = recoverCoordination(flags.id, undefined, {
+      authority,
+      recoveredBy: typeof flags.owner === "string" ? flags.owner : "cli",
+    });
     console.log(
-      `recovered ${describeCoordination(entry)}; the offline owner's record was released`,
+      (authority ?? "").trim().length > 0
+        ? `force-released ${describeCoordination(entry)} on declared authority (recorded, not verified)`
+        : `recovered ${describeCoordination(entry)}; the offline owner's record was released`,
     );
     return;
   }
@@ -1534,8 +1599,11 @@ Usage: agent-mail <command> [options]
 
 Messaging:
   notify --project <dir> --message <text> [--from <label>] [--reply-to <id>]
-         [--idempotency-key <key>] [--ttl <seconds>] [--no-slack]
-                        Send a message to a project's inbox
+         [--session <name-or-id>] [--idempotency-key <key>] [--ttl <seconds>]
+         [--no-slack]
+                        Send a message to a project's inbox. --session
+                        addresses one live session instead of broadcasting;
+                        an unknown or ambiguous name falls back to a broadcast.
   inbox [--project <dir>] [--limit N] [--unread]
                         Read a project's spool (defaults to cwd)
   mark-read [--project <dir>] (--id <message-id> | --all)
@@ -1573,8 +1641,11 @@ Coordination:
   coordination list [--project <dir> | --all] [--kind <kind>]
                     [--owner <owner>] [--condition <condition>] [--json]
                         List work and claims with recovery conditions
-  coordination recover --id <coordination-id>
-                        Release a record only when its owner is proven offline
+  coordination recover --id <coordination-id> [--authority <text>]
+                        Release a record only when its owner is proven offline.
+                        --authority <text> force-releases regardless of owner
+                        liveness; the text is recorded in an append-only log at
+                        ~/.claude/agent-mail/forced-recoveries.jsonl, never verified
   coordination request-transfer --id <work-id> [--reason <text>]
                     [--timeout <seconds>] [--owner <label>]
                         Request an auditable asynchronous work handoff

@@ -10,9 +10,12 @@ import {
   isStaleSession,
   lastActivityMs,
   legacyGeneratedSessionName,
+  matchSessions,
   resetSessionAliasCache,
+  resolveSessionQuery,
   sessionDisplayName,
   sessionFullName,
+  sessionIdFromEnv,
   sessionNames,
 } from "./sessions.ts";
 
@@ -175,4 +178,112 @@ test("isStaleSession agrees with the tag activityTag renders", () => {
       );
     }
   }
+});
+
+// --- session identity from the environment -----------------------------------
+
+test("a native session id wins over a launcher-minted one", () => {
+  // Order matters only when both are present, which is the nested case: an
+  // agent started inside another agent's shell inherits AGENT_SESSION_ID, then
+  // sets its own native id. The native id is the more specific of the two.
+  expect(
+    sessionIdFromEnv({
+      AGENT_SESSION_ID: "launcher-minted",
+      CLAUDE_CODE_SESSION_ID: "claude-native",
+    }),
+  ).toBe("claude-native");
+  expect(
+    sessionIdFromEnv({
+      AGENT_SESSION_ID: "launcher-minted",
+      CODEX_THREAD_ID: "codex-native",
+    }),
+  ).toBe("codex-native");
+});
+
+test("AGENT_SESSION_ID identifies agents that export no native id", () => {
+  // kimi and opencode export nothing per-session; without this the id falls
+  // through to a UUID minted inside the MCP server, which no sibling
+  // subprocess can learn, leaving the session unaddressable.
+  expect(sessionIdFromEnv({ AGENT_SESSION_ID: "launcher-minted" })).toBe(
+    "launcher-minted",
+  );
+  expect(sessionIdFromEnv({})).toBeUndefined();
+});
+
+test("an empty session id does not mask a real one further down the chain", () => {
+  expect(
+    sessionIdFromEnv({
+      CLAUDE_CODE_SESSION_ID: "",
+      CODEX_THREAD_ID: "",
+      AGENT_SESSION_ID: "launcher-minted",
+    }),
+  ).toBe("launcher-minted");
+  expect(sessionIdFromEnv({ CLAUDE_CODE_SESSION_ID: "" })).toBeUndefined();
+});
+
+// --- matching a --session argument -------------------------------------------
+
+const ADDRESSES = [
+  {
+    sessionId: SID,
+    fullName: "augur-quiet-lantern",
+    displayName: "Quiet Lantern",
+  },
+  {
+    sessionId: "other",
+    fullName: "augur-steady-star",
+    displayName: "Steady Star",
+  },
+];
+
+test("a session matches by id, full name, or display name", () => {
+  for (const query of [
+    SID,
+    "augur-quiet-lantern",
+    "Quiet Lantern",
+    "quiet lantern",
+  ]) {
+    expect(matchSessions(ADDRESSES, query).map((m) => m.sessionId)).toEqual([
+      SID,
+    ]);
+  }
+});
+
+test("a name that fits nothing matches nothing", () => {
+  expect(matchSessions(ADDRESSES, "augur-absent-moon")).toEqual([]);
+  // Partial names are not prefixes: addressing is exact, so a truncated id
+  // must fail rather than silently pick a session.
+  expect(matchSessions(ADDRESSES, SID.slice(0, 8))).toEqual([]);
+});
+
+test("every match is returned so callers can decide what ambiguity means", () => {
+  const twins = [
+    { sessionId: "a", fullName: "p-twin", displayName: "Twin" },
+    { sessionId: "b", fullName: "p-twin-2", displayName: "Twin" },
+  ];
+  expect(matchSessions(twins, "Twin").map((m) => m.sessionId)).toEqual([
+    "a",
+    "b",
+  ]);
+});
+
+test("resolveSessionQuery separates unique, absent, and ambiguous names", () => {
+  // The three cases callers branch on. Which of them count as errors is the
+  // caller's policy: send_mail refuses on none/ambiguous because an agent is
+  // there to retry, while notify broadcasts because an automation's addressee
+  // may have exited mid-job and refusing would discard the message entirely.
+  const unique = resolveSessionQuery(ADDRESSES, "Quiet Lantern");
+  expect(unique.kind).toBe("unique");
+  expect(unique.kind === "unique" && unique.session.sessionId).toBe(SID);
+
+  expect(resolveSessionQuery(ADDRESSES, "augur-absent-moon").kind).toBe("none");
+  expect(resolveSessionQuery([], "anything").kind).toBe("none");
+
+  const twins = [
+    { sessionId: "a", fullName: "p-twin", displayName: "Twin" },
+    { sessionId: "b", fullName: "p-twin-2", displayName: "Twin" },
+  ];
+  const ambiguous = resolveSessionQuery(twins, "Twin");
+  expect(ambiguous.kind).toBe("ambiguous");
+  expect(ambiguous.kind === "ambiguous" && ambiguous.matches).toHaveLength(2);
 });

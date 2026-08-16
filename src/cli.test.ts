@@ -578,3 +578,77 @@ test("work CLI attaches ownership to its registered Codex session", async () => 
     rmSync(root, { recursive: true });
   }
 });
+
+/** Spawn `notify` against a stub daemon and return the JSON it received. */
+async function notifyRequest(
+  args: string[],
+  env: Record<string, string> = {},
+): Promise<{
+  body: Record<string, unknown> | undefined;
+  exitCode: number;
+  stderr: string;
+}> {
+  const requests: Record<string, unknown>[] = [];
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      requests.push((await request.json()) as Record<string, unknown>);
+      return Response.json({ ok: true, status: "spooled", id: "test" });
+    },
+  });
+  try {
+    const child = Bun.spawn(
+      [process.execPath, join(import.meta.dir, "cli.ts"), "notify", ...args],
+      {
+        env: { ...process.env, ...env, AGENT_MAIL_PORT: String(server.port) },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const stderr = await new Response(child.stderr).text();
+    return { body: requests[0], exitCode: await child.exited, stderr };
+  } finally {
+    server.stop(true);
+  }
+}
+
+test("notify --session addresses one live session instead of broadcasting", async () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-notify-session-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const registry = join(home, ".claude", "agent-mail", "registry");
+  mkdirSync(project, { recursive: true });
+  mkdirSync(registry, { recursive: true });
+  // A registration is only live if its pid AND process start time still match,
+  // so borrow this test process's real identity rather than inventing a pid.
+  const self = processInfo([process.pid]).get(process.pid);
+  const canonical = realpathSync(project);
+  writeFileSync(
+    join(registry, `${projectSlug(canonical)}-${process.pid}.json`),
+    JSON.stringify({
+      cwd: canonical,
+      pid: process.pid,
+      ...(self ? { procStart: self.start } : {}),
+      sessionId: "submitter-session",
+      started: new Date().toISOString(),
+    }),
+  );
+
+  try {
+    const addressed = await notifyRequest(
+      [
+        "--project",
+        project,
+        "--message",
+        "job done",
+        "--session",
+        "submitter-session",
+      ],
+      { HOME: home },
+    );
+    expect(addressed.exitCode).toBe(0);
+    expect(addressed.body?.meta).toEqual({ toSession: "submitter-session" });
+  } finally {
+    rmSync(root, { recursive: true });
+  }
+});

@@ -1,7 +1,7 @@
 /** Normalized inspection and safe recovery across claims and work leases. */
 
-import { existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import {
   type Claim,
   type ClaimOwner,
@@ -9,7 +9,7 @@ import {
   claims,
   pathClaimTargets,
 } from "./claims.ts";
-import { displayName } from "./paths.ts";
+import { FORCED_RECOVERY_LOG_PATH, displayName } from "./paths.ts";
 import { coordinationProcessEvidence } from "./processSnapshot.ts";
 import {
   type ProcessInfo,
@@ -354,9 +354,58 @@ export function coordinationConflictAdvice(entry: CoordinationEntry): string {
   return "owner is live; use request_coordination_transfer for an auditable handoff";
 }
 
+/** Durable trace of a recovery that bypassed the liveness proof. */
+export interface ForcedRecoveryRecord {
+  at: string;
+  authority: string;
+  coordinationId: string;
+  kind: CoordinationKind;
+  project: string;
+  resourceType: string;
+  resourceLabel: string;
+  ownerLabel: string;
+  ownerStatus: OwnerStatus;
+  recoveredBy?: string;
+}
+
+/** Append a forced-recovery record. Best effort: an unwritable audit log must
+ * not strand a lock the operator has already decided to break, but the failure
+ * is surfaced rather than swallowed. */
+export function recordForcedRecovery(
+  record: ForcedRecoveryRecord,
+  logPath = FORCED_RECOVERY_LOG_PATH,
+): { logged: boolean; error?: string } {
+  try {
+    mkdirSync(dirname(logPath), { recursive: true });
+    appendFileSync(logPath, `${JSON.stringify(record)}\n`);
+    return { logged: true };
+  } catch (error) {
+    return { logged: false, error: (error as Error).message };
+  }
+}
+
+export interface RecoverOptions {
+  /** Operator-declared justification for breaking a lock that is live, manual,
+   * or unverifiable.
+   *
+   * This is an ATTESTATION, NOT A CREDENTIAL: agent-mail does not and cannot
+   * verify it. Claims here are advisory (see docs/decisions/0002), so the
+   * liveness check was never an enforcement boundary — it exists to stop an
+   * agent from casually stealing a peer's lock by reflex. Requiring a caller to
+   * name an authority preserves that friction and leaves a durable trace, while
+   * letting an operator who genuinely knows the owner is gone proceed without
+   * hand-deleting store files.
+   *
+   * Supplying it bypasses the liveness proof entirely. */
+  authority?: string;
+  /** Optional label for who performed the recovery, recorded in the audit log. */
+  recoveredBy?: string;
+}
+
 export function recoverCoordination(
   coordinationId: string,
   registrations = listLive(),
+  options: RecoverOptions = {},
 ): CoordinationEntry {
   const matches = listCoordination({ allProjects: true, registrations }).filter(
     (entry) => entry.id === coordinationId,
@@ -368,15 +417,48 @@ export function recoverCoordination(
     throw new Error(`coordination id is ambiguous: ${coordinationId}`);
   }
   const entry = matches[0];
-  if (!entry.recoverable) {
+  const authority = options.authority?.trim();
+  const forced = authority !== undefined && authority.length > 0;
+
+  if (!forced && !entry.recoverable) {
     throw new Error(
-      `${coordinationId} belongs to ${entry.owner.label}; its owner is live or cannot be verified offline`,
+      `${coordinationId} belongs to ${entry.owner.label}; its owner is live or cannot be verified offline. If you know the owner is gone, retry with an authority declaring who authorized breaking it (recorded, not verified).`,
     );
   }
+
+  // A forced recovery deletes the record regardless of owner liveness, so the
+  // store's own liveness gate must be told to stand down explicitly.
   const isLive = (
     owner: ClaimOwner | WorkOwner,
     record: Claim | WorkLease,
-  ): boolean => ownerStatus(owner, listLive(), record.createdAt) !== "offline";
+  ): boolean =>
+    forced
+      ? false
+      : ownerStatus(owner, listLive(), record.createdAt) !== "offline";
+
+  if (forced) {
+    // Write the audit record BEFORE the destructive delete: if the process dies
+    // between the two, an unexplained lock is recoverable, but a vanished lock
+    // with no trace of who took it is not.
+    const audit = recordForcedRecovery({
+      at: new Date().toISOString(),
+      authority: authority as string,
+      coordinationId: entry.id,
+      kind: entry.kind,
+      project: entry.project,
+      resourceType: entry.resourceType,
+      resourceLabel: entry.resourceLabel,
+      ownerLabel: entry.owner.label,
+      ownerStatus: entry.ownerStatus,
+      recoveredBy: options.recoveredBy,
+    });
+    if (!audit.logged) {
+      throw new Error(
+        `refusing to force recovery of ${coordinationId}: forced-recovery audit log could not be written (${audit.error})`,
+      );
+    }
+  }
+
   if (entry.kind === "work") {
     work.recover(entry.project, entry.id, isLive);
   } else {

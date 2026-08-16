@@ -39,6 +39,14 @@ export const SLACK_DASHBOARD_PATH = join(STATE_DIR, "slack-dashboard.json");
  * latency budget can skip the process scan. */
 export const PRESENCE_SNAPSHOT_PATH = join(STATE_DIR, "presence.json");
 export const PROCESS_SNAPSHOT_PATH = join(STATE_DIR, "processes.json");
+/** Append-only JSONL record of authority-forced coordination recoveries. A
+ * forced recovery bypasses the liveness proof, so the declared authority is the
+ * only trace of why an owner's record was taken; keep it durable and outside
+ * the per-project stores that a recovery deletes from. */
+export const FORCED_RECOVERY_LOG_PATH = join(
+  STATE_DIR,
+  "forced-recoveries.jsonl",
+);
 
 export const DEFAULT_PORT = 8377;
 export const LAUNCHD_LABEL = "com.osteele.agent-mail";

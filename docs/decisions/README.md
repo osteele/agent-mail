@@ -15,3 +15,5 @@ names the one it supersedes.
 |---|---|---|
 | [0001](0001-single-machine-coordination-identity.md) | Coordination owner identity assumes a single machine | 2026-08-15 |
 | [0002](0002-no-fencing-tokens.md) | Claims stay advisory; no fencing tokens | 2026-08-15 |
+| [0003](0003-addressing-automation-notifications.md) | Automation notifications are addressed to the submitting session | 2026-08-16 |
+| [0004](0004-authority-forced-recovery.md) | A declared authority can force recovery; it is recorded, not verified | 2026-08-16 |

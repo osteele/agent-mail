@@ -1,9 +1,19 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClaimStore } from "./claims.ts";
-import { listCoordination, ownerStatus } from "./coordination.ts";
+import {
+  listCoordination,
+  ownerStatus,
+  recordForcedRecovery,
+} from "./coordination.ts";
 import type { Registration } from "./registry.ts";
 import { WorkStore } from "./work.ts";
 
@@ -248,4 +258,88 @@ test("coordination conditions preserve the different resource lifecycles", () =>
   expect(entries.find((entry) => entry.id === experiment.id)?.condition).toBe(
     "materialized",
   );
+});
+
+test("recordForcedRecovery appends one JSON line per forced recovery", () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-forced-"));
+  temporaryDirectories.push(root);
+  const logPath = join(root, "nested", "forced-recoveries.jsonl");
+  const base = {
+    at: "2026-08-16T00:00:00.000Z",
+    kind: "path-claim" as const,
+    project: "/project",
+    resourceType: "edit-set",
+    resourceLabel: "2 claimed paths",
+    ownerLabel: "Nimble Cloud",
+    ownerStatus: "manual" as const,
+  };
+
+  expect(
+    recordForcedRecovery(
+      { ...base, authority: "operator: session is gone", coordinationId: "c1" },
+      logPath,
+    ).logged,
+  ).toBe(true);
+  expect(
+    recordForcedRecovery(
+      { ...base, authority: "operator: second", coordinationId: "c2" },
+      logPath,
+    ).logged,
+  ).toBe(true);
+
+  const lines = readFileSync(logPath, "utf8").trim().split("\n");
+  expect(lines).toHaveLength(2);
+  const first = JSON.parse(lines[0]);
+  expect(first.authority).toBe("operator: session is gone");
+  expect(first.coordinationId).toBe("c1");
+  expect(first.ownerStatus).toBe("manual");
+  expect(JSON.parse(lines[1]).coordinationId).toBe("c2");
+});
+
+test("recordForcedRecovery reports failure instead of throwing", () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-forced-fail-"));
+  temporaryDirectories.push(root);
+  // A regular file where the log's parent directory must be: mkdirSync fails.
+  const blocker = join(root, "blocker");
+  writeFileSync(blocker, "");
+  const result = recordForcedRecovery(
+    {
+      at: "2026-08-16T00:00:00.000Z",
+      authority: "operator",
+      coordinationId: "c1",
+      kind: "work",
+      project: "/project",
+      resourceType: "research-plan",
+      resourceLabel: "plan",
+      ownerLabel: "peer",
+      ownerStatus: "live",
+    },
+    join(blocker, "forced.jsonl"),
+  );
+  expect(result.logged).toBe(false);
+  expect(result.error).toBeDefined();
+});
+
+test("the store liveness gate is what a forced recovery stands down", () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-force-release-"));
+  temporaryDirectories.push(root);
+  const project = join(root, "project");
+  mkdirSync(project, { recursive: true });
+  const claimStore = new ClaimStore(join(root, "claims"));
+  const owner = { id: "peer", label: "Peer" };
+  const target = join(project, "held.md");
+  writeFileSync(target, "");
+  const claim = claimStore.claimPath(project, target, "file", owner);
+
+  // Default behavior: a live owner is never displaced.
+  expect(() => claimStore.recover(project, claim.id, () => true)).toThrow(
+    /its owner is live or cannot be verified offline/,
+  );
+  expect(claimStore.list(project)).toHaveLength(1);
+
+  // Forced behavior: recoverCoordination passes `() => false` when an authority
+  // is declared, which releases the record regardless of owner liveness.
+  const released = claimStore.recover(project, claim.id, () => false);
+  expect(released.id).toBe(claim.id);
+  expect(claimStore.list(project)).toHaveLength(0);
 });
