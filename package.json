@@ -17,6 +17,7 @@
   "devDependencies": {
     "@biomejs/biome": "^1.9.0",
     "@types/bun": "latest",
+    "fast-check": "^3.22.0",
     "typescript": "^5.6.0"
   }
 }

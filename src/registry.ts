@@ -1,11 +1,17 @@
 /** Registry of live channel servers: which sessions are listening, where. */
 
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   existsSync,
+  mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
+  rmdirSync,
+  statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -23,6 +29,8 @@ export interface Registration {
   procStart?: string; // `ps lstart` of that process at register time — a pid
   // alone is not an identity (pids are recycled; a dead session once read as
   // live for 10 days because a system daemon had inherited its pid)
+  instanceId?: string; // random identity of this channel process; distinguishes
+  // restarts even when process inspection is temporarily unavailable
 
   sessionId?: string; // host session id (Claude Code's; a random uuid under Codex)
   name?: string; // session name snapshot at register time; NOT used for display
@@ -34,6 +42,7 @@ export interface Registration {
   muted?: boolean; // channel push paused; messages still spool and flush on unmute
   inboundPolicy?: InboundPolicy;
   lastSeen?: string; // ISO 8601; stamped on each tool call the session makes
+  lastInboxPoll?: string; // ISO 8601; check_inbox specifically, not generic activity
   started: string; // ISO 8601
 }
 
@@ -44,13 +53,27 @@ export interface SessionCapabilities {
   inboxPoll: boolean;
   channelPush: boolean;
   claims: boolean;
+  workLeases: boolean;
   receipts: boolean;
   nativePeerMessaging: boolean;
+  /** Whether the host process was launched with an agent-mail channel flag.
+   *
+   * `channelPush` says this server will emit a notification; this says anything
+   * is listening for it. They diverged silently for days: mail spooled, a
+   * `pushed` receipt was written, and nothing reached the session, because the
+   * host had loaded no agent-mail channel. Undefined when process inspection is
+   * unavailable — never treat that as false. */
+  hostChannelLoaded?: boolean;
 }
 
 export interface ProcessInfo {
   start: string; // lstart tokens joined with single spaces
   command: string;
+}
+
+export interface ProcessScan {
+  processes: Map<number, ProcessInfo>;
+  reliable: boolean;
 }
 
 /** Parse one `ps -o pid=,lstart=,command=` output line. lstart is five tokens
@@ -75,6 +98,7 @@ export function parsePsLine(
 /** How many pids are worth querying one at a time before one whole-table scan
  * is cheaper. 12 × ~4 ms ≈ the ~24 ms flat cost of `ps -ww -A`. */
 const PS_LOOP_MAX = 12;
+const PS_EXECUTABLE = process.platform === "darwin" ? "/bin/ps" : "/usr/bin/ps";
 
 /** Inspect processes: start time + command per pid; a pid absent from the
  * result is not running.
@@ -92,30 +116,134 @@ const PS_LOOP_MAX = 12;
  * entries with no recorded `procStart` — truncation would silently prune a live
  * session.
  *
- * `ps` exits nonzero when a listed pid is gone but still reports the live ones,
- * so the exit status is ignored. */
-function processInfo(pids: number[]): Map<number, ProcessInfo> {
+ * A single-pid query exits 1 when that pid is gone; other nonzero statuses,
+ * spawn errors, and signals make the scan unreliable. Whole-table queries
+ * require status 0 and at least one parseable process row. An unavailable or
+ * nonconforming process inspector is not proof that every process is dead. */
+export function scanProcesses(
+  pids: number[],
+  executable = PS_EXECUTABLE,
+): ProcessScan {
   const map = new Map<number, ProcessInfo>();
   const wanted = new Set(pids);
-  if (wanted.size === 0) return map;
+  if (wanted.size === 0) return { processes: map, reliable: true };
+  let reliable = true;
   const queries =
     wanted.size <= PS_LOOP_MAX
       ? [...wanted].map((pid) => ["-ww", "-p", String(pid)])
       : [["-ww", "-A"]];
   for (const query of queries) {
-    const res = spawnSync("ps", [...query, "-o", "pid=,lstart=,command="], {
-      encoding: "utf8",
-    });
+    const res = spawnSync(
+      executable,
+      [...query, "-o", "pid=,lstart=,command="],
+      { encoding: "utf8" },
+    );
+    const singlePid = query[1] === "-p";
+    if (
+      res.error ||
+      res.signal ||
+      (singlePid ? res.status !== 0 && res.status !== 1 : res.status !== 0)
+    ) {
+      reliable = false;
+    }
+    let parsedAnyProcess = false;
     for (const line of (res.stdout ?? "").split("\n")) {
       const parsed = parsePsLine(line);
-      if (parsed && wanted.has(parsed.pid)) map.set(parsed.pid, parsed.info);
+      if (parsed) {
+        parsedAnyProcess = true;
+        if (wanted.has(parsed.pid)) map.set(parsed.pid, parsed.info);
+      }
     }
+    if (singlePid && res.status === 0 && !map.has(Number(query[2]))) {
+      reliable = false;
+    }
+    if (!singlePid && !parsedAnyProcess) reliable = false;
   }
-  return map;
+  return { processes: map, reliable };
+}
+
+/** Process map compatibility helper for presentation and tests. Liveness
+ * decisions use `scanProcesses` so they retain the reliability verdict. */
+export function processInfo(pids: number[]): Map<number, ProcessInfo> {
+  return scanProcesses(pids).processes;
 }
 
 function entryPath(cwd: string, pid: number): string {
   return join(REGISTRY_DIR, `${projectSlug(cwd)}-${pid}.json`);
+}
+
+function withEntryLock<T>(path: string, fn: () => T): T {
+  const lock = `${path}.lock`;
+  const deadline = Date.now() + 2_000;
+  while (true) {
+    try {
+      mkdirSync(lock);
+      break;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      let mtime: number;
+      try {
+        mtime = statSync(lock).mtimeMs;
+      } catch (statError) {
+        if ((statError as NodeJS.ErrnoException).code === "ENOENT") continue;
+        throw statError;
+      }
+      if (Date.now() - mtime > 30_000) {
+        try {
+          rmdirSync(lock);
+        } catch (removeError) {
+          if ((removeError as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw removeError;
+          }
+        }
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out waiting for registry lock ${path}`);
+      }
+      Bun.sleepSync(10);
+    }
+  }
+  try {
+    return fn();
+  } finally {
+    rmdirSync(lock);
+  }
+}
+
+function writeEntry(path: string, entry: Registration): void {
+  const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, JSON.stringify(entry, null, 1), { flag: "wx" });
+  try {
+    renameSync(temporary, path);
+  } finally {
+    if (existsSync(temporary)) unlinkSync(temporary);
+  }
+}
+
+function mutateEntry(
+  path: string,
+  mutate: (entry: Registration) => void,
+): boolean {
+  if (!existsSync(path)) return false;
+  return withEntryLock(path, () => {
+    if (!existsSync(path)) return false;
+    let entry: Registration;
+    try {
+      entry = JSON.parse(readFileSync(path, "utf8")) as Registration;
+    } catch (error) {
+      if (
+        error instanceof SyntaxError ||
+        (error as NodeJS.ErrnoException).code === "ENOENT"
+      ) {
+        return false;
+      }
+      throw error;
+    }
+    mutate(entry);
+    writeEntry(path, entry);
+    return true;
+  });
 }
 
 /** Before assigning the new naming scheme, bank the syllable names of every
@@ -153,52 +281,68 @@ export function register(
   client?: string,
   capabilities?: SessionCapabilities,
   defaultInboundPolicy: InboundPolicy = "accept",
+  knownProcStart?: string,
+  knownInstanceId?: string,
 ): string {
   ensureDirs();
   preserveRegisteredSessionNames();
   if (sessionId) assignedGeneratedSessionName(sessionId);
   const path = entryPath(cwd, pid);
-  // Preserve state set before this re-register: the original start time (the
-  // post-initialize re-register adds the client once the handshake reveals it),
-  // any mute toggled during the brief startup window, and the last-seen stamp.
-  let started = new Date().toISOString();
-  let muted: boolean | undefined;
-  let lastSeen: string | undefined;
-  let procStart: string | undefined;
-  let inboundPolicy = defaultInboundPolicy;
-  if (existsSync(path)) {
-    try {
-      const prev = JSON.parse(readFileSync(path, "utf8")) as Registration;
-      if (typeof prev.started === "string") started = prev.started;
-      if (typeof prev.muted === "boolean") muted = prev.muted;
-      if (typeof prev.lastSeen === "string") lastSeen = prev.lastSeen;
-      if (typeof prev.procStart === "string") procStart = prev.procStart;
-      if (
-        prev.inboundPolicy === "accept" ||
-        prev.inboundPolicy === "hold" ||
-        prev.inboundPolicy === "refuse"
-      ) {
-        inboundPolicy = prev.inboundPolicy;
+  const scan =
+    knownProcStart || knownInstanceId ? undefined : scanProcesses([pid]);
+  const procStart =
+    knownProcStart ??
+    (scan?.reliable ? scan.processes.get(pid)?.start : undefined);
+  withEntryLock(path, () => {
+    let previous: Registration | undefined;
+    if (existsSync(path)) {
+      try {
+        previous = JSON.parse(readFileSync(path, "utf8")) as Registration;
+      } catch (error) {
+        if (
+          !(error instanceof SyntaxError) &&
+          (error as NodeJS.ErrnoException).code !== "ENOENT"
+        ) {
+          throw error;
+        }
       }
-    } catch {
-      // corrupt prior entry; keep the fresh timestamp
     }
-  }
-  procStart ??= processInfo([pid]).get(pid)?.start;
-  const entry: Registration = {
-    cwd,
-    pid,
-    ...(procStart ? { procStart } : {}),
-    ...(sessionId ? { sessionId } : {}),
-    ...(name ? { name } : {}),
-    ...(client ? { client } : {}),
-    ...(capabilities ? { capabilities } : {}),
-    ...(muted !== undefined ? { muted } : {}),
-    inboundPolicy,
-    ...(lastSeen ? { lastSeen } : {}),
-    started,
-  };
-  writeFileSync(path, JSON.stringify(entry, null, 1));
+    const preserved =
+      (knownInstanceId !== undefined &&
+        previous?.instanceId === knownInstanceId) ||
+      (procStart !== undefined && previous?.procStart === procStart)
+        ? previous
+        : undefined;
+    const inboundPolicy =
+      preserved &&
+      (preserved.inboundPolicy === "hold" ||
+        preserved.inboundPolicy === "refuse")
+        ? preserved.inboundPolicy
+        : defaultInboundPolicy;
+    const entry: Registration = {
+      cwd,
+      pid,
+      ...(procStart ? { procStart } : {}),
+      ...(knownInstanceId ? { instanceId: knownInstanceId } : {}),
+      ...(sessionId ? { sessionId } : {}),
+      ...(name ? { name } : {}),
+      ...(client ? { client } : {}),
+      ...(capabilities ? { capabilities } : {}),
+      ...(preserved && typeof preserved.muted === "boolean"
+        ? { muted: preserved.muted }
+        : {}),
+      inboundPolicy,
+      ...(preserved?.lastSeen ? { lastSeen: preserved.lastSeen } : {}),
+      ...(preserved?.lastInboxPoll
+        ? { lastInboxPoll: preserved.lastInboxPoll }
+        : {}),
+      started:
+        preserved && typeof preserved.started === "string"
+          ? preserved.started
+          : new Date().toISOString(),
+    };
+    writeEntry(path, entry);
+  });
   return path;
 }
 
@@ -209,17 +353,9 @@ export function setInboundPolicy(
   pid: number,
   policy: InboundPolicy,
 ): boolean {
-  const path = entryPath(cwd, pid);
-  if (!existsSync(path)) return false;
-  let entry: Registration;
-  try {
-    entry = JSON.parse(readFileSync(path, "utf8")) as Registration;
-  } catch {
-    return false;
-  }
-  entry.inboundPolicy = policy;
-  writeFileSync(path, JSON.stringify(entry, null, 1));
-  return true;
+  return mutateEntry(entryPath(cwd, pid), (entry) => {
+    entry.inboundPolicy = policy;
+  });
 }
 
 export function inboundPolicy(cwd: string, pid: number): InboundPolicy {
@@ -237,17 +373,9 @@ export function inboundPolicy(cwd: string, pid: number): InboundPolicy {
 /** Toggle a session's channel-push mute. Returns false if no entry exists (the
  * session isn't/no longer listening). */
 export function setMuted(cwd: string, pid: number, muted: boolean): boolean {
-  const path = entryPath(cwd, pid);
-  if (!existsSync(path)) return false;
-  let entry: Registration;
-  try {
-    entry = JSON.parse(readFileSync(path, "utf8")) as Registration;
-  } catch {
-    return false;
-  }
-  entry.muted = muted;
-  writeFileSync(path, JSON.stringify(entry, null, 1));
-  return true;
+  return mutateEntry(entryPath(cwd, pid), (entry) => {
+    entry.muted = muted;
+  });
 }
 
 /** Whether a session's channel push is muted. Fail-open (deliver) on a missing
@@ -267,21 +395,28 @@ export function isMuted(cwd: string, pid: number): boolean {
 /** Stamp a session's last-seen time (called on each tool call it serves).
  * No-op if the entry is missing or corrupt. */
 export function touch(cwd: string, pid: number): void {
-  const path = entryPath(cwd, pid);
-  if (!existsSync(path)) return;
-  let entry: Registration;
-  try {
-    entry = JSON.parse(readFileSync(path, "utf8")) as Registration;
-  } catch {
-    return;
-  }
-  entry.lastSeen = new Date().toISOString();
-  writeFileSync(path, JSON.stringify(entry, null, 1));
+  mutateEntry(entryPath(cwd, pid), (entry) => {
+    entry.lastSeen = new Date().toISOString();
+  });
+}
+
+/** Stamp an explicit inbox check separately from generic MCP activity.
+ * Poll-only clients cannot receive an alert, so recent `lastSeen` is not
+ * evidence that they will discover newly spooled mail. */
+export function touchInboxPoll(cwd: string, pid: number): void {
+  mutateEntry(entryPath(cwd, pid), (entry) => {
+    const now = new Date().toISOString();
+    entry.lastSeen = now;
+    entry.lastInboxPoll = now;
+  });
 }
 
 export function unregister(cwd: string, pid: number): void {
   const path = entryPath(cwd, pid);
-  if (existsSync(path)) rmSync(path);
+  if (!existsSync(path)) return;
+  withEntryLock(path, () => {
+    if (existsSync(path)) rmSync(path);
+  });
 }
 
 /** Whether the pid still belongs to the process that registered: same start
@@ -310,8 +445,25 @@ function readEntries(
     let entry: Registration;
     try {
       entry = JSON.parse(readFileSync(path, "utf8")) as Registration;
-    } catch {
-      rmSync(path);
+    } catch (error) {
+      if (
+        !(error instanceof SyntaxError) &&
+        (error as NodeJS.ErrnoException).code !== "ENOENT"
+      ) {
+        throw error;
+      }
+      if (!existsSync(path)) continue;
+      withEntryLock(path, () => {
+        if (!existsSync(path)) return;
+        try {
+          JSON.parse(readFileSync(path, "utf8"));
+        } catch (currentError) {
+          if (currentError instanceof SyntaxError) rmSync(path);
+          else if ((currentError as NodeJS.ErrnoException).code !== "ENOENT") {
+            throw currentError;
+          }
+        }
+      });
       continue;
     }
     if (!keep || keep(entry)) entries.push({ path, entry });
@@ -326,15 +478,35 @@ function verifyLive(
   entries: { path: string; entry: Registration }[],
   bankLegacyNames: boolean,
 ): Registration[] {
-  const procs = processInfo(entries.map((e) => e.entry.pid));
+  const scan = scanProcesses(entries.map((e) => e.entry.pid));
+  if (!scan.reliable) {
+    for (const { entry } of entries) {
+      if (bankLegacyNames && entry.sessionId) {
+        assignedGeneratedSessionName(entry.sessionId, true);
+      }
+    }
+    return entries.map(({ entry }) => entry);
+  }
   const out: Registration[] = [];
   for (const { path, entry } of entries) {
-    if (isCurrentProcess(entry, procs.get(entry.pid))) {
+    if (isCurrentProcess(entry, scan.processes.get(entry.pid))) {
       if (bankLegacyNames && entry.sessionId)
         assignedGeneratedSessionName(entry.sessionId, true);
       out.push(entry);
     } else {
-      rmSync(path);
+      withEntryLock(path, () => {
+        if (!existsSync(path)) return;
+        const current = JSON.parse(readFileSync(path, "utf8")) as Registration;
+        if (
+          current.pid === entry.pid &&
+          current.sessionId === entry.sessionId &&
+          current.procStart === entry.procStart &&
+          current.instanceId === entry.instanceId &&
+          current.started === entry.started
+        ) {
+          rmSync(path);
+        }
+      });
     }
   }
   return out;

@@ -87,8 +87,9 @@ A handoff is a small state machine layered on the spool:
 - **Offer → accept/decline** — a message typed as a handoff carries a task
   reference; the recipient session accepts or declines, and the offerer is
   notified of the transition (not just delivery).
-- **Claim/lease** — when several sessions share a directory's inbox, a handoff
-  can be claimed by exactly one, so two agents don't both pick it up.
+- **Work-lease transfer** — reuse the shipped exclusive logical-work lease for
+  accepted handoffs, adding an atomic owner transfer so no third session can
+  acquire the resource between release and acceptance.
 - **Status echo** — handoff transitions echo to Slack as a compact status line
   (offered → accepted by <session> → done), giving a human-readable audit trail
   of which agent owns what.
@@ -99,8 +100,10 @@ and reuses **threading** (a handoff and its accept/decline are one thread).
 ## Visualization
 
 The `dashboard` (web) and `slack-dashboard` commands already cover live
-presence, a sender→recipient traffic ranking, a flight log, and 24h volume.
-Building on the same `dashboardData` aggregation:
+presence, unified coordination health, a sender→recipient traffic ranking, a
+flight log, and 24h volume. The daemon serves the web monitor continuously;
+the standalone command remains a daemon-down fallback. Building on the same
+`dashboardData` aggregation:
 
 - **Realtime stream** — a `/api/stream` SSE endpoint so the web dashboard
   updates on append instead of polling; edges in a force-directed graph pulse as

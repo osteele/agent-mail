@@ -1,4 +1,8 @@
 import { expect, test } from "bun:test";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { projectSlug } from "./paths.ts";
 import {
   type AdmissionOptions,
   type Message,
@@ -78,10 +82,15 @@ test("admission deduplicates retry keys and recent identical bodies", () => {
       admission,
       now,
     ),
-  ).toEqual({ status: "duplicate", id: "prior" });
+  ).toEqual({ status: "duplicate", id: "prior", reason: "idempotency-key" });
+  // Same text, no key: caught by the signature window instead. The reason has
+  // to distinguish the two — a sender that generated a one-off key reads a
+  // key collision as its own message having already landed, and must not read
+  // a signature collision the same way.
   expect(admissionDecision([prior], { ...base }, admission, now)).toEqual({
     status: "duplicate",
     id: "prior",
+    reason: "signature",
   });
 });
 
@@ -139,3 +148,61 @@ test("Slack echo defaults on and can be suppressed per message", () => {
   expect(shouldEchoMessageToSlack({ ...base, slackEcho: true })).toBe(true);
   expect(shouldEchoMessageToSlack({ ...base, slackEcho: false })).toBe(false);
 });
+
+test("findReceipts locates a sent message's receipts in the recipient's project", async () => {
+  // The defect this guards: receipts are keyed to the recipient's project, so a
+  // sender querying its own project always saw nothing, and an empty result
+  // reads as "dropped". Three sessions acted on that in one day. STATE_DIR is
+  // resolved at module load from HOME, so this runs in a subprocess.
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-findreceipts-"));
+  const receiptsDir = join(root, ".claude", "agent-mail", "receipts");
+  const inboxDir = join(root, ".claude", "agent-mail", "inbox");
+  mkdirSync(receiptsDir, { recursive: true });
+  mkdirSync(inboxDir, { recursive: true });
+  const sender = "/projects/sender";
+  const recipient = "/projects/recipient";
+  // knownProjects() discovers projects from each spool's first line, and both
+  // spool and receipt files are named by projectSlug — not by any name we pick.
+  for (const project of [sender, recipient]) {
+    writeFileSync(
+      join(inboxDir, `${projectSlug(project)}.jsonl`),
+      `${JSON.stringify({ id: `seed-${projectSlug(project)}`, ts: "2026-08-17T00:00:00.000Z", from: "x", project, message: "seed" })}\n`,
+    );
+  }
+  writeFileSync(
+    join(receiptsDir, `${projectSlug(recipient)}.jsonl`),
+    `${JSON.stringify({ messageId: "m-1", project: recipient, ts: "2026-08-17T06:00:00.000Z", status: "spooled" })}\n${JSON.stringify({ messageId: "m-1", project: recipient, ts: "2026-08-17T06:00:01.000Z", status: "pushed", sessionId: "s-1" })}\n`,
+  );
+
+  const script = join(root, "probe.ts");
+  writeFileSync(
+    script,
+    [
+      `import { findReceipts, readReceipts } from ${JSON.stringify(join(import.meta.dir, "spool.ts"))};`,
+      `const own = readReceipts(${JSON.stringify(sender)}, "m-1").length;`,
+      `const found = findReceipts("m-1", ${JSON.stringify(sender)});`,
+      `const missing = findReceipts("absent", ${JSON.stringify(sender)});`,
+      "console.log(JSON.stringify({ own, project: found?.project ?? null, count: found?.receipts.length ?? 0, missing: missing === undefined }));",
+    ].join("\n"),
+  );
+  try {
+    const child = Bun.spawn([process.execPath, script], {
+      env: { ...process.env, HOME: root },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    expect(await child.exited).toBe(0);
+    const out = JSON.parse(await new Response(child.stdout).text()) as {
+      own: number;
+      project: string | null;
+      count: number;
+      missing: boolean;
+    };
+    expect(out.own).toBe(0); // the old, misleading answer
+    expect(out.project).toBe(recipient); // found where they actually live
+    expect(out.count).toBe(2);
+    expect(out.missing).toBe(true); // a genuinely unknown id still reports nothing
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 20000);

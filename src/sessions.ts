@@ -414,6 +414,82 @@ export function sessionDisplayName(
   return sessionNames(sessionId, meta, cwd, generatedName).displayName;
 }
 
+// --- Session identity from the environment -----------------------------------
+
+/** Env vars that carry a per-session agent id, in resolution order.
+ *
+ * Native ids come first: an agent that mints its own per-session id knows more
+ * than a launcher wrapping it does. `AGENT_SESSION_ID` is the generic fallback
+ * for agents that export nothing of their own (kimi and opencode export only
+ * process-level or workspace-level ids, neither of which separates two sessions
+ * in one directory). The guard launcher mints it and unsets the native ids
+ * first, so a nested agent cannot be mistaken for the parent that launched it —
+ * plain inheritance would otherwise hand a nested kimi its parent's
+ * CLAUDE_CODE_SESSION_ID. */
+export const SESSION_ID_ENV_VARS = [
+  "CLAUDE_CODE_SESSION_ID",
+  "CODEX_THREAD_ID",
+  "AGENT_SESSION_ID",
+] as const;
+
+/** Resolve the calling agent's session id from the environment.
+ *
+ * Empty values are skipped rather than winning the chain: an `export X=""`
+ * upstream would otherwise mask a real id further down it. */
+export function sessionIdFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  for (const name of SESSION_ID_ENV_VARS) {
+    const value = env[name];
+    if (value) return value;
+  }
+  return undefined;
+}
+
+/** The subset of a session's identity that `--session` can be matched against. */
+export interface SessionAddress {
+  sessionId: string;
+  fullName: string;
+  displayName: string;
+}
+
+/** Sessions a `--session` argument names: exact id, exact full name, or
+ * case-insensitive display name. Returning every match lets each caller decide
+ * what an ambiguous name means — send_mail refuses, notify broadcasts. */
+export function matchSessions<T extends SessionAddress>(
+  candidates: T[],
+  query: string,
+): T[] {
+  const normalized = query.toLocaleLowerCase();
+  return candidates.filter(
+    (c) =>
+      c.sessionId === query ||
+      c.fullName === query ||
+      c.displayName.toLocaleLowerCase() === normalized,
+  );
+}
+
+export type SessionQueryResult<T> =
+  | { kind: "unique"; session: T }
+  | { kind: "none" }
+  | { kind: "ambiguous"; matches: T[] };
+
+/** `matchSessions` reduced to the three cases callers actually branch on.
+ *
+ * Whether "none" and "ambiguous" are errors is the caller's policy, not this
+ * function's: an agent calling send_mail is present to read an error and retry,
+ * while an automation reporting a finished job is not, and refusing there would
+ * discard the message. */
+export function resolveSessionQuery<T extends SessionAddress>(
+  candidates: T[],
+  query: string,
+): SessionQueryResult<T> {
+  const matches = matchSessions(candidates, query);
+  if (matches.length === 1) return { kind: "unique", session: matches[0] };
+  if (matches.length === 0) return { kind: "none" };
+  return { kind: "ambiguous", matches };
+}
+
 // --- Session recency ---------------------------------------------------------
 //
 // "Attached" (channel server alive, will receive push) and "present" (the agent

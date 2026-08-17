@@ -7,7 +7,10 @@
  *   registry/<id>.json     live channel-server registrations
  *   session-names/<id>.json persistent generated session names
  *   claims/<slug>/          experiment-number and path claims
+ *   work/<slug>/            exclusive logical-work leases
+ *   transfers/              auditable work-lease transfer requests
  *   presence.json          daemon snapshot of the live registry
+ *   processes.json         daemon snapshot of coordination-owner processes
  *   daemon.pid, daemon.log daemon state
  * Config:     ~/.config/agent-mail/config.toml
  */
@@ -24,6 +27,8 @@ export const RECEIPTS_DIR = join(STATE_DIR, "receipts");
 export const REGISTRY_DIR = join(STATE_DIR, "registry");
 export const SESSION_NAMES_DIR = join(STATE_DIR, "session-names");
 export const CLAIMS_DIR = join(STATE_DIR, "claims");
+export const WORK_DIR = join(STATE_DIR, "work");
+export const TRANSFERS_DIR = join(STATE_DIR, "transfers");
 export const CONFIG_DIR = join(homedir(), ".config", "agent-mail");
 export const CONFIG_PATH = join(CONFIG_DIR, "config.toml");
 export const PID_PATH = join(STATE_DIR, "daemon.pid");
@@ -33,6 +38,15 @@ export const SLACK_DASHBOARD_PATH = join(STATE_DIR, "slack-dashboard.json");
 /** Periodic daemon snapshot of the pid-verified live registry, so readers on a
  * latency budget can skip the process scan. */
 export const PRESENCE_SNAPSHOT_PATH = join(STATE_DIR, "presence.json");
+export const PROCESS_SNAPSHOT_PATH = join(STATE_DIR, "processes.json");
+/** Append-only JSONL record of authority-forced coordination recoveries. A
+ * forced recovery bypasses the liveness proof, so the declared authority is the
+ * only trace of why an owner's record was taken; keep it durable and outside
+ * the per-project stores that a recovery deletes from. */
+export const FORCED_RECOVERY_LOG_PATH = join(
+  STATE_DIR,
+  "forced-recoveries.jsonl",
+);
 
 export const DEFAULT_PORT = 8377;
 export const LAUNCHD_LABEL = "com.osteele.agent-mail";
@@ -46,6 +60,8 @@ export function ensureDirs(): void {
     REGISTRY_DIR,
     SESSION_NAMES_DIR,
     CLAIMS_DIR,
+    WORK_DIR,
+    TRANSFERS_DIR,
     CONFIG_DIR,
   ]) {
     mkdirSync(dir, { recursive: true });

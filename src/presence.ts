@@ -42,6 +42,19 @@ export interface PresenceSnapshot {
   sessions: Registration[];
 }
 
+/** Non-mutating view exposed by `agent-mail listeners --no-sync --json`.
+ *
+ * `fresh: false` deliberately carries no sessions. Consumers that use this
+ * for advisory routing must fail closed rather than treating an old process
+ * verdict as proof that a recipient can still receive a message. */
+export interface ListenerSnapshot {
+  version: 1;
+  source: "presence-snapshot";
+  fresh: boolean;
+  generatedAt: number | null;
+  sessions: Registration[];
+}
+
 const SNAPSHOT_VERSION = 1;
 
 /** Three times the daemon's 10s tick: tolerates a missed beat without letting
@@ -57,12 +70,13 @@ export const PRESENCE_SNAPSHOT_TTL_MS = 30_000;
 export function writePresenceSnapshot(
   nowMs = Date.now(),
   path = PRESENCE_SNAPSHOT_PATH,
+  sessions?: Registration[],
 ): PresenceSnapshot {
   const snapshot: PresenceSnapshot = {
     version: SNAPSHOT_VERSION,
     generatedAt: nowMs,
     generatedBy: process.pid,
-    sessions: listLive(),
+    sessions: sessions ?? listLive(),
   };
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(snapshot, null, 1));
@@ -91,6 +105,28 @@ export function readPresenceSnapshot(
   if (!Number.isFinite(snapshot.generatedAt)) return undefined;
   if (nowMs - snapshot.generatedAt > maxAgeMs) return undefined;
   return snapshot as PresenceSnapshot;
+}
+
+/** Read the daemon's fresh presence snapshot without scanning processes,
+ * pruning registry files, or falling back to another source. */
+export function readListenerSnapshot(
+  project?: string,
+  nowMs = Date.now(),
+  path = PRESENCE_SNAPSHOT_PATH,
+): ListenerSnapshot {
+  const snapshot = readPresenceSnapshot(nowMs, PRESENCE_SNAPSHOT_TTL_MS, path);
+  const canon = project ? canonicalProject(project) : undefined;
+  return {
+    version: 1,
+    source: "presence-snapshot",
+    fresh: snapshot !== undefined,
+    generatedAt: snapshot?.generatedAt ?? null,
+    sessions:
+      snapshot?.sessions.filter(
+        (registration) =>
+          canon === undefined || canonicalProject(registration.cwd) === canon,
+      ) ?? [],
+  };
 }
 
 /** Live registrations sharing `project`, from a fresh snapshot when there is

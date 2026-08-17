@@ -2,15 +2,21 @@
 /** agent-mail CLI.
  *
  * Messaging:
- *   agent-mail notify --project <dir> --message <text> [--from <label>] [--no-slack]
+ *   agent-mail notify --project <dir> --message <text> [--from <label>] [--session <name-or-id>] [--no-slack]
  *   agent-mail inbox [--project <dir>] [--limit N] [--unread]
  *   agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
- *   agent-mail listeners
+ *   agent-mail listeners [--project <dir>] [--json] [--no-sync]
  *   agent-mail mute|unmute (--session <name-or-id> | --project <dir>)
- *   agent-mail claim-experiment [--project <dir>] [--notebook <dir>]
- *   agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>]
+ *   agent-mail claim-experiment [--project <dir>] [--notebook <dir>] [--owner <label>]
+ *   agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>] [--owner <label>]
  *   agent-mail claims [--project <dir>]
  *   agent-mail release-claim --id <claim-id> [--project <dir>]
+ *   agent-mail work list [--project <dir> | --all]
+ *   agent-mail work acquire --type <type> --key <key> [--project <dir>] [--owner <label>]
+ *   agent-mail work update --id <work-id> [--state working|waiting]
+ *   agent-mail work release --id <work-id> [--project <dir>]
+ *   agent-mail coordination list [--project <dir> | --all]
+ *   agent-mail coordination recover --id <coordination-id> [--authority <text>]
  *
  * Dashboards:
  *   agent-mail dashboard [--port N] [--open] [--no-tui]
@@ -40,12 +46,22 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   type Claim,
+  ClaimConflictError,
   type ClaimOwner,
   claims,
   pathClaimTargets,
 } from "./claims.ts";
 import { loadConfig } from "./config.ts";
+import {
+  coordinationConflictAdvice,
+  ownerStatus as coordinationOwnerStatus,
+  describeCoordination,
+  listCoordination,
+  recoverCoordination,
+} from "./coordination.ts";
 import { openBrowser, serveDashboard } from "./dashboard.ts";
+import { buildReadOnlyState } from "./dashboardData.ts";
+import { classifyFallback, withAttemptKey } from "./delivery.ts";
 import {
   addNativeAuditHook,
   claudeRegistrationMatches,
@@ -61,7 +77,11 @@ import {
   displayName,
   ensureDirs,
 } from "./paths.ts";
-import { liveInProject, statusLineName } from "./presence.ts";
+import {
+  liveInProject,
+  readListenerSnapshot,
+  statusLineName,
+} from "./presence.ts";
 import {
   type InboundPolicy,
   type Registration,
@@ -73,6 +93,8 @@ import {
   activityTag,
   claudeSessions,
   lastActivityMs,
+  resolveSessionQuery,
+  sessionIdFromEnv,
   sessionNames,
 } from "./sessions.ts";
 import {
@@ -87,14 +109,26 @@ import {
   readMessages,
   readReceipts,
 } from "./spool.ts";
+import {
+  findWorkLease,
+  flushTransferNotifications,
+  transfers,
+} from "./transfers.ts";
+import { type WorkLease, type WorkState, work } from "./work.ts";
+import { WorkConflictError } from "./work.ts";
 
 function capabilityTag(r: Registration): string {
   const capabilities = r.capabilities;
   if (!capabilities) return "";
   const labels = [
-    capabilities.channelPush ? "channel" : "poll",
+    capabilities.channelPush
+      ? capabilities.hostChannelLoaded === false
+        ? "channel:host-not-loaded"
+        : "channel"
+      : "poll",
     capabilities.nativePeerMessaging ? "native-peer" : undefined,
     capabilities.claims ? "claims" : undefined,
+    capabilities.workLeases ? "work" : undefined,
     capabilities.receipts ? "receipts" : undefined,
   ].filter(Boolean);
   return labels.length ? ` {${labels.join(",")}}` : "";
@@ -280,6 +314,7 @@ async function cmdStatus(): Promise<void> {
   console.log(`daemon: ${pid === null ? "stopped" : `running (pid ${pid})`}`);
   console.log(`launchd: ${launchdInstalled() ? "installed" : "not installed"}`);
   console.log(`port: ${config.port}`);
+  console.log(`dashboard: http://127.0.0.1:${config.port}/`);
   console.log(
     `slack echo: ${config.slackWebhook ? config.slackEcho : "unconfigured"}`,
   );
@@ -355,6 +390,48 @@ function resolveProjectArg(arg: string): string {
   process.exit(1);
 }
 
+/** Resolve `notify --session` to a single live session, or explain why not.
+ *
+ * Unlike send_mail, an unresolvable name is not an error here. The caller is an
+ * automation reporting a finished job, and its addressee is a session that may
+ * well have exited while the job ran; refusing would drop the notification
+ * entirely, which is strictly worse than the project broadcast this replaces.
+ * So an unknown or ambiguous name degrades to a broadcast and says so. */
+function resolveNotifySession(
+  project: string,
+  session: string,
+):
+  | { kind: "session"; sessionId: string; label: string }
+  | { kind: "broadcast"; reason: string } {
+  const meta = claudeSessions();
+  const candidates = listLive()
+    .filter((r) => r.sessionId && canonicalProject(r.cwd) === project)
+    .map((r) => {
+      const sid = r.sessionId as string;
+      const names = sessionNames(sid, meta.get(sid), project);
+      return {
+        sessionId: sid,
+        fullName: names.fullName,
+        displayName: names.displayName,
+      };
+    });
+  const resolved = resolveSessionQuery(candidates, session);
+  if (resolved.kind === "unique") {
+    return {
+      kind: "session",
+      sessionId: resolved.session.sessionId,
+      label: resolved.session.displayName,
+    };
+  }
+  return {
+    kind: "broadcast",
+    reason:
+      resolved.kind === "none"
+        ? `no live session "${session}" in ${project}`
+        : `"${session}" matches ${resolved.matches.length} live sessions`,
+  };
+}
+
 async function cmdNotify(
   flags: Record<string, string | boolean>,
 ): Promise<void> {
@@ -362,7 +439,7 @@ async function cmdNotify(
   const message = flags.message;
   if (typeof project !== "string" || typeof message !== "string") {
     console.error(
-      "usage: agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to <id>] [--idempotency-key <key>] [--ttl <seconds>] [--no-slack]",
+      "usage: agent-mail notify --project <dir> --message <text> [--from <label>] [--session <name-or-id>] [--reply-to <id>] [--idempotency-key <key>] [--ttl <seconds>] [--no-slack]",
     );
     process.exit(1);
   }
@@ -385,19 +462,40 @@ async function cmdNotify(
   }
   const from = typeof flags.from === "string" ? flags.from : "cli";
   const suppressSlack = flags["no-slack"] === true;
-  const body = JSON.stringify({
+  // An addressed message is hidden from every other session in the project
+  // (spool.ts `messageVisibleToSession`), so resolving here is the whole of
+  // the fan-out fix — no delivery-path change is needed.
+  let toSession: string | undefined;
+  if (typeof flags.session === "string" && flags.session !== "") {
+    const resolved = resolveNotifySession(resolvedProject, flags.session);
+    if (resolved.kind === "session") {
+      toSession = resolved.sessionId;
+    } else {
+      console.error(`broadcasting to the project: ${resolved.reason}`);
+    }
+  }
+  const meta = toSession ? { toSession } : undefined;
+  // One message, used for both the daemon POST and the fallback append. The
+  // attempt key is what lets the fallback recognise a message the daemon had
+  // already stored before its reply went missing.
+  const attempt = withAttemptKey({
+    ts: new Date().toISOString(),
+    from,
     project: resolvedProject,
     message,
-    from,
     origin: {
       kind: "automation",
       transport: "cli",
       authority: "untrusted",
     },
+    ...(meta ? { meta } : {}),
     ...(idempotencyKey ? { idempotencyKey } : {}),
-    ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
     ...(replyTo ? { replyTo } : {}),
     ...(suppressSlack ? { slackEcho: false } : {}),
+  });
+  const body = JSON.stringify({
+    ...attempt,
+    ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
   });
   try {
     const resp = await fetch(`http://127.0.0.1:${config.port}/notify`, {
@@ -418,42 +516,47 @@ async function cmdNotify(
     console.error(`daemon error: HTTP ${resp.status} ${await resp.text()}`);
     process.exit(1);
   } catch {
-    // Daemon down: append directly so the message is not lost.
-    const result = appendMessageGuarded(
-      {
-        ts: new Date().toISOString(),
-        from,
-        project: resolvedProject,
-        message,
-        origin: {
-          kind: "automation",
-          transport: "cli",
-          authority: "untrusted",
+    // The daemon gave no usable answer. It may still have appended the message
+    // and lost only the reply, so the outcome below distinguishes that from a
+    // genuine duplicate rather than reporting both as suppressed.
+    const outcome = classifyFallback(
+      appendMessageGuarded(
+        {
+          ...attempt,
+          ...(ttlSeconds !== undefined
+            ? {
+                expiresAt: new Date(
+                  Date.now() + ttlSeconds * 1000,
+                ).toISOString(),
+              }
+            : {}),
         },
-        ...(idempotencyKey ? { idempotencyKey } : {}),
-        ...(ttlSeconds !== undefined
-          ? {
-              expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
-            }
-          : {}),
-        ...(replyTo ? { replyTo } : {}),
-        ...(suppressSlack ? { slackEcho: false } : {}),
-      },
-      {
-        duplicateWindowSeconds: config.duplicateWindowSeconds,
-        messageRateLimitPerMinute: config.messageRateLimitPerMinute,
-        defaultMessageTtlSeconds: config.defaultMessageTtlSeconds,
-      },
+        {
+          duplicateWindowSeconds: config.duplicateWindowSeconds,
+          messageRateLimitPerMinute: config.messageRateLimitPerMinute,
+          defaultMessageTtlSeconds: config.defaultMessageTtlSeconds,
+        },
+      ),
     );
-    if (result.status === "rate_limited") {
-      console.error(`rate limited; retry in ${result.retryAfterSeconds}s`);
-      process.exit(1);
+    switch (outcome.kind) {
+      case "rate_limited":
+        console.error(`rate limited; retry in ${outcome.retryAfterSeconds}s`);
+        process.exit(1);
+        break;
+      case "already-delivered":
+        console.log(
+          `spooled ${outcome.id} via daemon (its reply never arrived)`,
+        );
+        break;
+      case "duplicate":
+        console.log(`duplicate suppressed (${outcome.id})`);
+        break;
+      case "spooled":
+        console.log(
+          `daemon unreachable; spooled ${outcome.id} directly (no Slack echo)`,
+        );
+        break;
     }
-    console.log(
-      result.status === "duplicate"
-        ? `duplicate suppressed (${result.id})`
-        : `daemon unreachable; spooled ${result.id} directly (no Slack echo)`,
-    );
   }
 }
 
@@ -518,8 +621,42 @@ function cmdReceipts(flags: Record<string, string | boolean>): void {
   }
 }
 
-function cmdListeners(): void {
-  const live = listLive();
+function cmdListeners(flags: Record<string, string | boolean>): void {
+  const project =
+    typeof flags.project === "string"
+      ? flags["no-sync"] === true
+        ? canonicalProject(flags.project)
+        : resolveProjectArg(flags.project)
+      : undefined;
+  const snapshot =
+    flags["no-sync"] === true ? readListenerSnapshot(project) : undefined;
+  const live = snapshot
+    ? snapshot.sessions
+    : listLive().filter(
+        (registration) =>
+          project === undefined ||
+          canonicalProject(registration.cwd) === project,
+      );
+  if (flags.json === true) {
+    console.log(
+      JSON.stringify(
+        snapshot ?? {
+          version: 1,
+          source: "live-registry",
+          fresh: true,
+          generatedAt: Date.now(),
+          sessions: live,
+        },
+        null,
+        2,
+      ),
+    );
+    return;
+  }
+  if (snapshot && !snapshot.fresh) {
+    console.log("no fresh presence snapshot; no sessions reported");
+    return;
+  }
   if (live.length === 0) {
     console.log("no sessions listening");
     return;
@@ -587,7 +724,7 @@ async function cmdStatusLine(
     const sessionId =
       typeof flags.session === "string"
         ? flags.session
-        : (payload?.session_id ?? process.env.CLAUDE_CODE_SESSION_ID);
+        : (payload?.session_id ?? sessionIdFromEnv());
     const sessions = liveInProject(project);
     const names = claudeSessions();
     const name = statusLineName(
@@ -620,15 +757,46 @@ function claimProject(flags: Record<string, string | boolean>): string {
     : canonicalProject(process.cwd());
 }
 
-function cliOwner(flags: Record<string, string | boolean>): ClaimOwner {
-  const label = typeof flags.owner === "string" ? flags.owner : "cli";
+function cliOwner(
+  flags: Record<string, string | boolean>,
+  project: string,
+): ClaimOwner {
+  const label = typeof flags.owner === "string" ? flags.owner : undefined;
+  const sessionId = sessionIdFromEnv();
+  if (sessionId) {
+    const registration = listLive().find(
+      (entry) =>
+        entry.sessionId === sessionId &&
+        canonicalProject(entry.cwd) === canonicalProject(project),
+    );
+    if (registration) {
+      const identity = sessionNames(
+        sessionId,
+        claudeSessions().get(sessionId),
+        registration.cwd,
+      );
+      return {
+        id: sessionId,
+        label: label ?? identity.displayName,
+        sessionId,
+        pid: registration.pid,
+        ...(registration.procStart
+          ? { procStart: registration.procStart }
+          : {}),
+        ...(registration.instanceId
+          ? { instanceId: registration.instanceId }
+          : {}),
+      };
+    }
+  }
+  if (!label) {
+    throw new Error(
+      "coordination acquisition outside a registered agent session requires --owner <label>",
+    );
+  }
   return {
-    id:
-      typeof flags.owner === "string"
-        ? `cli:${flags.owner}`
-        : `cli:${process.pid}`,
+    id: `cli:${label}`,
     label,
-    pid: process.pid,
   };
 }
 
@@ -642,6 +810,26 @@ function describeClaim(claim: Claim): string {
   return `${claim.id} ${resource} — ${claim.owner.label} [${claim.createdAt}]`;
 }
 
+function withConflictGuidance<T>(project: string, operation: () => T): T {
+  try {
+    return operation();
+  } catch (error) {
+    const record =
+      error instanceof WorkConflictError
+        ? error.lease
+        : error instanceof ClaimConflictError
+          ? error.claim
+          : undefined;
+    if (!record) throw error;
+    const entry = listCoordination({ project }).find(
+      (candidate) => candidate.id === record.id,
+    );
+    if (!entry) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`${message}; ${coordinationConflictAdvice(entry)}`);
+  }
+}
+
 function cmdClaimExperiment(flags: Record<string, string | boolean>): void {
   const project = claimProject(flags);
   const notebook =
@@ -650,7 +838,11 @@ function cmdClaimExperiment(flags: Record<string, string | boolean>): void {
       : existsSync(join(project, "lab-notebook"))
         ? join(project, "lab-notebook")
         : project;
-  const claim = claims.claimExperiment(project, notebook, cliOwner(flags));
+  const claim = claims.claimExperiment(
+    project,
+    notebook,
+    cliOwner(flags, project),
+  );
   console.log(`${claim.experimentId} ${claim.id}`);
 }
 
@@ -667,10 +859,17 @@ function cmdClaimPath(
   }
   const project = claimProject(flags);
   const pathType = flags.directory === true ? "directory" : "file";
-  const claim = claims.claimPaths(
-    project,
-    paths.map((path) => ({ path: resolve(project, path), pathType })),
-    cliOwner(flags),
+  const claim = withConflictGuidance(project, () =>
+    claims.claimPaths(
+      project,
+      paths.map((path) => ({ path: resolve(project, path), pathType })),
+      cliOwner(flags, project),
+      {
+        ownerIsLive: (owner, claim) =>
+          coordinationOwnerStatus(owner, listLive(), claim.createdAt) !==
+          "offline",
+      },
+    ),
   );
   console.log(`${claim.id}`);
   for (const target of pathClaimTargets(claim)) {
@@ -696,6 +895,255 @@ function cmdReleaseClaim(flags: Record<string, string | boolean>): void {
   }
   const claim = claims.release(claimProject(flags), flags.id);
   console.log(`released ${describeClaim(claim)}`);
+}
+
+function cmdCoordination(
+  flags: Record<string, string | boolean>,
+  args: string[],
+): void {
+  const subcommand = args[0] ?? "list";
+  if (subcommand === "list") {
+    if (flags.all && typeof flags.project === "string") {
+      throw new Error("coordination list accepts --project or --all, not both");
+    }
+    let entries = listCoordination(
+      flags.all ? { allProjects: true } : { project: claimProject(flags) },
+    );
+    if (typeof flags.kind === "string") {
+      entries = entries.filter((entry) => entry.kind === flags.kind);
+    }
+    if (typeof flags.owner === "string") {
+      const owner = flags.owner.toLocaleLowerCase();
+      entries = entries.filter(
+        (entry) =>
+          entry.owner.id === flags.owner ||
+          entry.owner.sessionId === flags.owner ||
+          entry.owner.label.toLocaleLowerCase() === owner,
+      );
+    }
+    if (typeof flags.condition === "string") {
+      entries = entries.filter((entry) => entry.condition === flags.condition);
+    }
+    if (flags.json === true) {
+      console.log(JSON.stringify({ schemaVersion: 1, entries }, null, 2));
+      return;
+    }
+    if (entries.length === 0) {
+      console.log("no active coordination");
+      return;
+    }
+    for (const entry of entries) console.log(describeCoordination(entry));
+    return;
+  }
+  if (subcommand === "recover") {
+    if (typeof flags.id !== "string") {
+      throw new Error(
+        "usage: agent-mail coordination recover --id <coordination-id> [--authority <text>]",
+      );
+    }
+    const authority =
+      typeof flags.authority === "string" ? flags.authority : undefined;
+    const entry = recoverCoordination(flags.id, undefined, {
+      authority,
+      recoveredBy: typeof flags.owner === "string" ? flags.owner : "cli",
+    });
+    console.log(
+      (authority ?? "").trim().length > 0
+        ? `force-released ${describeCoordination(entry)} on declared authority (recorded, not verified)`
+        : `recovered ${describeCoordination(entry)}; the offline owner's record was released`,
+    );
+    return;
+  }
+  if (subcommand === "request-transfer") {
+    if (typeof flags.id !== "string") {
+      throw new Error(
+        "usage: agent-mail coordination request-transfer --id <work-id> [--reason <text>] [--timeout <seconds>] [--owner <label>]",
+      );
+    }
+    const lease = findWorkLease(flags.id);
+    const timeoutSeconds =
+      typeof flags.timeout === "string" ? Number(flags.timeout) : undefined;
+    const result = transfers.request(lease, cliOwner(flags, lease.project), {
+      reason: typeof flags.reason === "string" ? flags.reason : undefined,
+      timeoutSeconds,
+    });
+    flushTransferNotifications();
+    console.log(JSON.stringify(result.request, null, 2));
+    return;
+  }
+  if (subcommand === "respond-transfer") {
+    if (
+      typeof flags.id !== "string" ||
+      (flags.decision !== "accept" && flags.decision !== "decline")
+    ) {
+      throw new Error(
+        "usage: agent-mail coordination respond-transfer --id <request-id> --decision accept|decline [--message <text>] [--owner <label>]",
+      );
+    }
+    const request = transfers.get(flags.id);
+    if (!request) throw new Error(`transfer request not found: ${flags.id}`);
+    const result = transfers.respond(
+      request.id,
+      cliOwner(flags, request.project),
+      flags.decision,
+      typeof flags.message === "string" ? flags.message : undefined,
+    );
+    flushTransferNotifications();
+    console.log(JSON.stringify(result.request, null, 2));
+    return;
+  }
+  if (subcommand === "transfers") {
+    transfers.settleExpired();
+    flushTransferNotifications();
+    const requests = flags.all
+      ? transfers.list()
+      : transfers.list(claimProject(flags));
+    if (flags.json === true) {
+      console.log(JSON.stringify({ schemaVersion: 1, requests }, null, 2));
+    } else if (requests.length === 0) {
+      console.log("no coordination transfers");
+    } else {
+      for (const request of requests) {
+        console.log(
+          `${request.id} ${displayName(request.project)}/${request.resourceType}:${request.resourceKey} — ${request.requester.label} requests from ${request.expectedOwner.label} [${request.status}] [deadline ${request.deadline}]`,
+        );
+      }
+    }
+    return;
+  }
+  throw new Error(
+    "usage: agent-mail coordination list|recover|request-transfer|respond-transfer|transfers [options]",
+  );
+}
+
+function parseWorkState(
+  value: string | boolean | undefined,
+): WorkState | undefined {
+  if (value === undefined) return undefined;
+  if (value === "working" || value === "waiting") return value;
+  throw new Error("work state must be working or waiting");
+}
+
+function describeWork(lease: WorkLease, live = listLive()): string {
+  const label = lease.resource.label
+    ? `${lease.resource.label} (${lease.resource.type}:${lease.resource.key})`
+    : `${lease.resource.type}:${lease.resource.key}`;
+  const activity = lease.activity ? ` — ${lease.activity}` : "";
+  const ownerStatus =
+    coordinationOwnerStatus(lease.owner, live, lease.createdAt) !== "offline"
+      ? ""
+      : " [owner offline]";
+  return `${lease.id} ${displayName(lease.project)}/${label} — ${lease.owner.label} [${lease.state}]${activity} [updated ${lease.updatedAt}]${ownerStatus}`;
+}
+
+function cmdWork(
+  flags: Record<string, string | boolean>,
+  args: string[],
+): void {
+  const subcommand = args[0];
+  if (subcommand === "list") {
+    if (flags.all && typeof flags.project === "string") {
+      throw new Error("work list accepts --project or --all, not both");
+    }
+    let leases = flags.all ? work.listAll() : work.list(claimProject(flags));
+    if (typeof flags.type === "string") {
+      leases = leases.filter((lease) => lease.resource.type === flags.type);
+    }
+    if (typeof flags.owner === "string") {
+      const owner = flags.owner.toLocaleLowerCase();
+      leases = leases.filter(
+        (lease) =>
+          lease.owner.id === flags.owner ||
+          lease.owner.sessionId === flags.owner ||
+          lease.owner.label.toLocaleLowerCase() === owner,
+      );
+    }
+    if (leases.length === 0) {
+      console.log("no active work");
+      return;
+    }
+    const live = listLive();
+    for (const lease of leases) console.log(describeWork(lease, live));
+    return;
+  }
+
+  if (subcommand === "acquire") {
+    if (typeof flags.type !== "string" || typeof flags.key !== "string") {
+      throw new Error(
+        "usage: agent-mail work acquire --type <type> --key <key> [--label <label>] [--source <path>] [--state working|waiting] [--activity <text>] [--project <dir>] [--owner <label>]",
+      );
+    }
+    const project = claimProject(flags);
+    const owner = cliOwner(flags, project);
+    const resourceType = flags.type;
+    const resourceKey = flags.key;
+    const lease = withConflictGuidance(project, () =>
+      work.acquire(
+        project,
+        {
+          type: resourceType,
+          key: resourceKey,
+          ...(typeof flags.label === "string" ? { label: flags.label } : {}),
+          ...(typeof flags.source === "string"
+            ? { sourcePath: resolve(project, flags.source) }
+            : {}),
+        },
+        owner,
+        {
+          state: parseWorkState(flags.state),
+          activity:
+            typeof flags.activity === "string" ? flags.activity : undefined,
+          ownerIsLive: (candidate, existing) =>
+            coordinationOwnerStatus(
+              candidate,
+              listLive(),
+              existing.createdAt,
+            ) !== "offline",
+        },
+      ),
+    );
+    console.log(describeWork(lease));
+    return;
+  }
+
+  if (subcommand === "update") {
+    if (typeof flags.id !== "string") {
+      throw new Error(
+        "usage: agent-mail work update --id <work-id> [--state working|waiting] [--activity <text>] [--project <dir>]",
+      );
+    }
+    const project = claimProject(flags);
+    const lease = work.list(project).find((item) => item.id === flags.id);
+    if (!lease) throw new Error(`work lease not found: ${flags.id}`);
+    const state = parseWorkState(flags.state);
+    const activity =
+      typeof flags.activity === "string" ? flags.activity : undefined;
+    if (state === undefined && activity === undefined) {
+      throw new Error("work update requires --state or --activity");
+    }
+    console.log(
+      describeWork(
+        work.update(project, lease.id, lease.owner.id, { state, activity }),
+      ),
+    );
+    return;
+  }
+
+  if (subcommand === "release") {
+    if (typeof flags.id !== "string") {
+      throw new Error(
+        "usage: agent-mail work release --id <work-id> [--project <dir>]",
+      );
+    }
+    console.log(
+      `released ${describeWork(work.release(claimProject(flags), flags.id))}`,
+    );
+    return;
+  }
+
+  throw new Error(
+    "usage: agent-mail work list|acquire|update|release [options]",
+  );
 }
 
 // --- mute / unmute ------------------------------------------------------------
@@ -1034,8 +1482,26 @@ function cmdUninstall(): void {
   uninstallNativeAuditHook();
 }
 
-function cmdDashboard(flags: Record<string, string | boolean>): void {
+async function cmdDashboard(
+  flags: Record<string, string | boolean>,
+): Promise<void> {
   const config = loadConfig();
+  if (typeof flags.port !== "string") {
+    const url = `http://127.0.0.1:${config.port}/`;
+    try {
+      const response = await fetch(`${url}health`, {
+        signal: AbortSignal.timeout(750),
+      });
+      if (response.ok) {
+        console.log(`agent-mail dashboard → ${url} (persistent daemon)`);
+        if (flags.open === true) openBrowser(url);
+        return;
+      }
+    } catch {
+      // The direct-filesystem standalone server below remains available when
+      // launchd is stopped or the configured daemon port is unreachable.
+    }
+  }
   const port =
     typeof flags.port === "string" ? Number(flags.port) : config.port + 1;
   const server = serveDashboard(port);
@@ -1088,6 +1554,32 @@ function cmdDashboard(flags: Record<string, string | boolean>): void {
   }
 }
 
+async function cmdState(
+  flags: Record<string, string | boolean>,
+): Promise<void> {
+  const project =
+    typeof flags.project === "string"
+      ? canonicalProject(flags.project)
+      : undefined;
+  if (flags["no-sync"] !== true) {
+    const config = loadConfig();
+    const query = project ? `?project=${encodeURIComponent(project)}` : "";
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${config.port}/api/v1/state${query}`,
+        { signal: AbortSignal.timeout(750) },
+      );
+      if (response.ok) {
+        console.log(await response.text());
+        return;
+      }
+    } catch {
+      // The snapshot-only filesystem fallback below is deliberately read-only.
+    }
+  }
+  console.log(JSON.stringify(buildReadOnlyState({ project }), null, 2));
+}
+
 async function cmdSlackDashboard(
   flags: Record<string, string | boolean>,
 ): Promise<void> {
@@ -1123,15 +1615,20 @@ Usage: agent-mail <command> [options]
 
 Messaging:
   notify --project <dir> --message <text> [--from <label>] [--reply-to <id>]
-         [--idempotency-key <key>] [--ttl <seconds>] [--no-slack]
-                        Send a message to a project's inbox
+         [--session <name-or-id>] [--idempotency-key <key>] [--ttl <seconds>]
+         [--no-slack]
+                        Send a message to a project's inbox. --session
+                        addresses one live session instead of broadcasting;
+                        an unknown or ambiguous name falls back to a broadcast.
   inbox [--project <dir>] [--limit N] [--unread]
                         Read a project's spool (defaults to cwd)
   mark-read [--project <dir>] (--id <message-id> | --all)
                         Mark messages read
   receipts [--project <dir>] [--id <message-id>] [--limit N]
                         Show append-only delivery state changes
-  listeners             List live sessions
+  listeners [--project <dir>] [--json] [--no-sync]
+                        List sessions. --no-sync reads only the daemon's fresh
+                        snapshot and never scans or prunes the registry.
   mute | unmute (--session <name-or-id> | --project <dir>)
                         Pause / resume channel push for matching sessions
   inbound --policy accept|hold|refuse (--session <name-or-id> | --project <dir>)
@@ -1147,10 +1644,40 @@ Coordination:
                         List active claims
   release-claim --id <claim-id> [--project <dir>]
                         Release a claim
+  work list [--project <dir> | --all] [--type <type>] [--owner <owner>]
+                        List exclusive logical-work leases
+  work acquire --type <type> --key <key> [--label <label>] [--source <path>]
+               [--state working|waiting] [--activity <text>] [--project <dir>]
+               [--owner <label>]
+                        Acquire exclusive responsibility for logical work
+  work update --id <work-id> [--state working|waiting] [--activity <text>]
+                        Update a work lease
+  work release --id <work-id> [--project <dir>]
+                        Release responsibility for logical work
+  coordination list [--project <dir> | --all] [--kind <kind>]
+                    [--owner <owner>] [--condition <condition>] [--json]
+                        List work and claims with recovery conditions
+  coordination recover --id <coordination-id> [--authority <text>]
+                        Release a record only when its owner is proven offline.
+                        --authority <text> force-releases regardless of owner
+                        liveness; the text is recorded in an append-only log at
+                        ~/.claude/agent-mail/forced-recoveries.jsonl, never verified
+  coordination request-transfer --id <work-id> [--reason <text>]
+                    [--timeout <seconds>] [--owner <label>]
+                        Request an auditable asynchronous work handoff
+  coordination respond-transfer --id <request-id>
+                    --decision accept|decline [--message <text>]
+                        Answer a transfer request as the exact lease owner
+  coordination transfers [--project <dir> | --all] [--json]
+                        List transfer requests and dispositions
 
 Dashboards:
+  state [--project <dir>] [--no-sync] [--json]
+                        Versioned, non-mutating aggregate state. Uses the daemon
+                        when available; --no-sync reads filesystem snapshots.
   dashboard [--port N] [--open] [--no-tui]
-                        Serve the web dashboard (press o to open, q to quit)
+                        Show the persistent daemon dashboard, or serve a
+                        direct-filesystem fallback when the daemon is down
   slack-dashboard [--watch <seconds>]
                         Post / refresh the editable Slack dashboard
 
@@ -1197,7 +1724,7 @@ switch (cmd) {
     cmdReceipts(flags);
     break;
   case "listeners":
-    cmdListeners();
+    cmdListeners(flags);
     break;
   case "status-line":
     await cmdStatusLine(flags);
@@ -1223,6 +1750,12 @@ switch (cmd) {
   case "release-claim":
     cmdReleaseClaim(flags);
     break;
+  case "work":
+    cmdWork(flags, rest);
+    break;
+  case "coordination":
+    cmdCoordination(flags, rest);
+    break;
   case "start":
     cmdStart();
     break;
@@ -1243,7 +1776,10 @@ switch (cmd) {
     cmdLogs(rest.includes("-f") || rest.includes("--follow"));
     break;
   case "dashboard":
-    cmdDashboard(flags);
+    await cmdDashboard(flags);
+    break;
+  case "state":
+    await cmdState(flags);
     break;
   case "slack-dashboard":
     await cmdSlackDashboard(flags);

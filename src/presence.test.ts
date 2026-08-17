@@ -16,6 +16,7 @@ import {
   type PresenceSnapshot,
   liveInProject,
   peersInProject,
+  readListenerSnapshot,
   readPresenceSnapshot,
   statusLineName,
   writePresenceSnapshot,
@@ -113,10 +114,47 @@ test("readPresenceSnapshot returns undefined rather than throwing on junk", () =
   ).toBeUndefined();
 });
 
+test("readListenerSnapshot fails closed without scanning or stale sessions", () => {
+  const dir = scratch();
+  const path = snapshotFile(dir, {
+    version: 1,
+    generatedAt: NOW - 45_000,
+    generatedBy: 1,
+    sessions: [reg({ pid: 1, sessionId: "stale" })],
+  } satisfies PresenceSnapshot);
+  expect(readListenerSnapshot(undefined, NOW, path)).toEqual({
+    version: 1,
+    source: "presence-snapshot",
+    fresh: false,
+    generatedAt: null,
+    sessions: [],
+  });
+});
+
+test("readListenerSnapshot filters a fresh snapshot by canonical project", () => {
+  const dir = scratch();
+  const other = scratch();
+  const path = snapshotFile(dir, {
+    version: 1,
+    generatedAt: NOW - 5_000,
+    generatedBy: 1,
+    sessions: [
+      reg({ cwd: dir, pid: 1, sessionId: "same-project" }),
+      reg({ cwd: other, pid: 2, sessionId: "other-project" }),
+    ],
+  } satisfies PresenceSnapshot);
+  const report = readListenerSnapshot(dir, NOW, path);
+  expect(report.fresh).toBeTrue();
+  expect(report.generatedAt).toBe(NOW - 5_000);
+  expect(report.sessions.map((session) => session.sessionId)).toEqual([
+    "same-project",
+  ]);
+});
+
 test("writePresenceSnapshot round-trips and leaves no temp file behind", () => {
   const dir = scratch();
   const path = join(dir, "presence.json");
-  const written = writePresenceSnapshot(NOW, path);
+  const written = writePresenceSnapshot(NOW, path, []);
   const read = readPresenceSnapshot(NOW, 30_000, path);
   expect(read?.generatedAt).toBe(written.generatedAt);
   expect(read?.sessions.length).toBe(written.sessions.length);

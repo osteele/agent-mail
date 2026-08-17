@@ -5,6 +5,8 @@
  *   POST /notify   {project, from, message, meta?} -> append spool, echo Slack
  *   POST /read     {project, ids?} or {project, all:true} -> mark read
  *   GET  /health   daemon liveness + config summary
+ *   GET  /          persistent read-only dashboard
+ *   GET  /api/state dashboard JSON
  *   GET  /registry live channel-server registrations
  *   GET  /inbox?project=<path>&limit=N&unread=1  read a project's spool
  *
@@ -13,8 +15,10 @@
 
 import { appendFileSync, writeFileSync } from "node:fs";
 import { type Config, loadConfig } from "./config.ts";
+import { dashboardResponse } from "./dashboard.ts";
 import { LOG_PATH, PID_PATH, canonicalProject, ensureDirs } from "./paths.ts";
 import { writePresenceSnapshot } from "./presence.ts";
+import { writeProcessSnapshot } from "./processSnapshot.ts";
 import { listLive } from "./registry.ts";
 import { claudeSessions, resetSessionAliasCache } from "./sessions.ts";
 import { formatSlackEcho } from "./slackEcho.ts";
@@ -28,6 +32,7 @@ import {
   readReceipts,
   shouldEchoMessageToSlack,
 } from "./spool.ts";
+import { flushTransferNotifications, transfers } from "./transfers.ts";
 
 let config: Config = loadConfig();
 
@@ -95,6 +100,11 @@ const server = Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
 
+    if (req.method === "GET") {
+      const dashboard = dashboardResponse(req);
+      if (dashboard) return dashboard;
+    }
+
     if (req.method === "GET" && url.pathname === "/health") {
       return json({
         ok: true,
@@ -160,6 +170,9 @@ const server = Bun.serve({
           authority: "untrusted",
         },
         ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
+        // Stored verbatim: the sender matches against it if it has to fall back
+        // to a direct append after losing this response.
+        ...(body.attemptKey ? { attemptKey: body.attemptKey } : {}),
         ...(ttlSeconds !== undefined
           ? { expiresAt: new Date(now + ttlSeconds * 1000).toISOString() }
           : body.expiresAt
@@ -225,6 +238,12 @@ let lastLiveCount = -1;
 function tickPresence(): void {
   try {
     const snapshot = writePresenceSnapshot();
+    writeProcessSnapshot();
+    flushTransferNotifications();
+    for (const request of transfers.settleExpired()) {
+      log(`coordination transfer ${request.id}: ${request.status}`);
+    }
+    flushTransferNotifications();
     // Log only on change: this fires every 10s and daemon.log is long-lived.
     if (snapshot.sessions.length !== lastLiveCount) {
       lastLiveCount = snapshot.sessions.length;

@@ -47,7 +47,7 @@ function buildBlocks(state: DashboardState): object[] {
           type: "mrkdwn",
           text:
             `*${t.messages}* messages · *${t.projects}* projects · ` +
-            `*${t.threads}* threads · *${t.live}* live · updated ` +
+            `*${t.threads}* threads · *${t.live}* live · *${t.coordination}* coordination · updated ` +
             `<!date^${Math.floor(Date.parse(state.now) / 1000)}^{time}|now>`,
         },
       ],
@@ -72,6 +72,26 @@ function buildBlocks(state: DashboardState): object[] {
   blocks.push({
     type: "section",
     text: { type: "mrkdwn", text: `*Live sessions*\n${presence}` },
+  });
+
+  const compact = (value: string, max: number): string =>
+    value.length > max ? `${value.slice(0, max - 1)}…` : value;
+  const coordination = state.coordination.length
+    ? state.coordination
+        .slice(0, 8)
+        .map(
+          (item) =>
+            `${item.condition === "healthy" ? "🟢" : item.condition === "owner-offline" || item.condition === "source-missing" || item.condition === "materialized" ? "🟠" : "🔵"} *${compact(item.projectLabel, 40)}* — ` +
+            `${compact(item.resourceLabel, 80)} ` +
+            `\`${compact(item.kind, 40)}\` — ` +
+            `${compact(item.owner.label, 40)}${item.state ? ` _[${item.state}]_` : ""}` +
+            `${item.activity ? ` ${compact(item.activity, 120)}` : ""}`,
+        )
+        .join("\n")
+    : "_no active coordination_";
+  blocks.push({
+    type: "section",
+    text: { type: "mrkdwn", text: `*Coordination*\n${coordination}` },
   });
 
   const routes = state.routes.length

@@ -106,6 +106,33 @@ test("a path batch is stored and released as one claim", () => {
   expect(store.list(project)).toEqual([]);
 });
 
+test("a replacement process cannot release the original process claim", () => {
+  const { project, store } = fixture();
+  const originalOwner: ClaimOwner = {
+    id: "session-a",
+    label: "Original",
+    sessionId: "session-a",
+    pid: 101,
+    instanceId: "original-instance",
+  };
+  const replacementOwner: ClaimOwner = {
+    ...originalOwner,
+    pid: 202,
+    instanceId: "replacement-instance",
+  };
+  const claim = store.claimPath(
+    project,
+    join(project, "owned.ts"),
+    "file",
+    originalOwner,
+  );
+
+  expect(() => store.release(project, claim.id, replacementOwner)).toThrow(
+    "only its owner can release it",
+  );
+  expect(store.list(project)).toEqual([claim]);
+});
+
 test("a conflicting path batch creates no partial claims", () => {
   const { project, store } = fixture();
   const occupied = store.claimPath(
@@ -202,6 +229,98 @@ test("releaseOwner clears all claims held by one session", () => {
   expect(store.list(project).map((claim) => claim.owner.id)).toEqual([
     ownerB.id,
   ]);
+});
+
+test("a conflicting path claim from a dead session is displaced atomically", () => {
+  const { project, store } = fixture();
+  const stale = store.claimPaths(
+    project,
+    [
+      { path: join(project, "occupied.swift"), pathType: "file" },
+      { path: join(project, "other.swift"), pathType: "file" },
+    ],
+    ownerA,
+  );
+
+  const replacement = store.claimPath(
+    project,
+    join(project, "occupied.swift"),
+    "file",
+    ownerB,
+    { ownerIsLive: (owner) => owner.id !== stale.owner.id },
+  );
+
+  expect(store.list(project)).toEqual([replacement]);
+});
+
+test("a live conflict leaves earlier stale conflicts untouched", () => {
+  const { project, store } = fixture();
+  const stale = store.claimPath(
+    project,
+    join(project, "stale.swift"),
+    "file",
+    ownerA,
+  );
+  const live = store.claimPath(
+    project,
+    join(project, "live.swift"),
+    "file",
+    ownerB,
+  );
+
+  expect(() =>
+    store.claimPaths(
+      project,
+      [
+        { path: join(project, "stale.swift"), pathType: "file" },
+        { path: join(project, "live.swift"), pathType: "file" },
+      ],
+      { id: "agent-c", label: "agent C" },
+      { ownerIsLive: (owner) => owner.id === ownerB.id },
+    ),
+  ).toThrow(ClaimConflictError);
+  expect(store.list(project)).toEqual([stale, live]);
+});
+
+test("shutdown cleanup only releases claims from the same owner process", () => {
+  const { project, store } = fixture();
+  const oldOwner = { ...ownerA, pid: 101 };
+  const replacementOwner = { ...ownerA, pid: 202 };
+  store.claimPath(project, join(project, "old.md"), "file", oldOwner);
+  const replacement = store.claimPath(
+    project,
+    join(project, "replacement.md"),
+    "file",
+    replacementOwner,
+  );
+
+  expect(store.releaseOwner(project, ownerA.id, oldOwner.pid)).toBe(1);
+  expect(store.list(project)).toEqual([replacement]);
+});
+
+test("experiment allocation ignores directories and non-markdown prefixes", () => {
+  const { project, notebook, store } = fixture();
+  mkdirSync(join(notebook, "experiments", "EXP-900-scratch"));
+  writeFileSync(join(notebook, "experiments", "EXP-800-notes.txt"), "");
+
+  expect(store.claimExperiment(project, notebook, ownerA).experimentId).toBe(
+    "EXP-001",
+  );
+});
+
+test("recovery only removes a claim whose owner is definitively offline", () => {
+  const { project, store } = fixture();
+  const claim = store.claimPath(
+    project,
+    join(project, "notes.md"),
+    "file",
+    ownerA,
+  );
+  expect(() => store.recover(project, claim.id, () => true)).toThrow(
+    "live or cannot be verified offline",
+  );
+  expect(store.recover(project, claim.id, () => false)).toEqual(claim);
+  expect(store.listAll()).toEqual([]);
 });
 
 test("an abandoned transaction lock does not permanently block claims", () => {

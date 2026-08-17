@@ -3,8 +3,11 @@
  * Reads the spools and the live registry directly — no daemon dependency, so a
  * dashboard works even when the daemon is down. */
 
-import { displayName } from "./paths.ts";
-import { listLive } from "./registry.ts";
+import { type CoordinationEntry, listCoordination } from "./coordination.ts";
+import { canonicalProject, displayName } from "./paths.ts";
+import { readListenerSnapshot } from "./presence.ts";
+import { readProcessSnapshot } from "./processSnapshot.ts";
+import { type ProcessScan, type Registration, listLive } from "./registry.ts";
 import {
   activityTag,
   claudeSessions,
@@ -12,6 +15,7 @@ import {
   sessionNames,
 } from "./sessions.ts";
 import { type StoredMessage, readAllMessages } from "./spool.ts";
+import { type WorkTransferRequest, transfers } from "./transfers.ts";
 
 export interface FlowRoute {
   from: string;
@@ -40,6 +44,11 @@ export interface PresenceEntry {
   inboundPolicy: string;
   muted?: boolean; // channel push paused
   pid: number;
+  procStart?: string;
+  instanceId?: string;
+  started: string;
+  lastSeen?: string;
+  lastInboxPoll?: string;
 }
 
 export interface VolumeBucket {
@@ -47,13 +56,73 @@ export interface VolumeBucket {
   count: number;
 }
 
+export interface WorkEntry {
+  id: string;
+  project: string;
+  resourceType: string;
+  resourceKey: string;
+  resourceLabel?: string;
+  sourcePath?: string;
+  owner: string;
+  ownerSessionId?: string;
+  ownerLive: boolean;
+  state: string;
+  activity?: string;
+  updatedAt: string;
+}
+
 export interface DashboardState {
+  schemaVersion: 1;
+  generatedAt: string;
+  source: {
+    mode: "live-filesystem" | "filesystem-snapshot";
+    presence: "live-registry" | "presence-snapshot";
+    coordination: "filesystem";
+    messages: "spool";
+  };
+  freshness: {
+    presence: boolean;
+    presenceGeneratedAt: number | null;
+    processEvidence: boolean;
+    processEvidenceGeneratedAt: number | null;
+  };
   now: string;
-  totals: { messages: number; projects: number; threads: number; live: number };
+  totals: {
+    messages: number;
+    projects: number;
+    threads: number;
+    live: number;
+    work: number;
+    claims: number;
+    coordination: number;
+  };
   presence: PresenceEntry[];
+  work: WorkEntry[];
+  coordination: CoordinationEntry[];
   routes: FlowRoute[];
   log: LogEntry[];
   volume: VolumeBucket[];
+  messages: StoredMessage[];
+  transfers: WorkTransferRequest[];
+}
+
+function activeWork(entries: CoordinationEntry[]): WorkEntry[] {
+  return entries
+    .filter((entry) => entry.kind === "work")
+    .map((entry) => ({
+      id: entry.id,
+      project: entry.projectLabel,
+      resourceType: entry.resourceType,
+      resourceKey: entry.resourceKey,
+      resourceLabel: entry.resourceLabel,
+      sourcePath: entry.sourcePaths[0],
+      owner: entry.owner.label,
+      ownerSessionId: entry.owner.sessionId,
+      ownerLive: entry.ownerStatus !== "offline",
+      state: entry.state ?? "working",
+      activity: entry.activity,
+      updatedAt: entry.updatedAt,
+    }));
 }
 
 /** One-line snippet of a message body. */
@@ -62,9 +131,9 @@ function preview(text: string, max = 120): string {
   return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
 }
 
-function presence(): PresenceEntry[] {
+function presence(registrations: Registration[]): PresenceEntry[] {
   const meta = claudeSessions();
-  return listLive()
+  return registrations
     .map((r) => {
       // Derive the label from live Claude meta + cwd; the registry `name`
       // snapshot may be stale (a rename) or a legacy synthetic id.
@@ -90,12 +159,18 @@ function presence(): PresenceEntry[] {
               r.capabilities.channelPush ? "channel" : "poll",
               r.capabilities.nativePeerMessaging ? "native-peer" : undefined,
               r.capabilities.claims ? "claims" : undefined,
+              r.capabilities.workLeases ? "work" : undefined,
               r.capabilities.receipts ? "receipts" : undefined,
             ].filter((value): value is string => Boolean(value))
           : [],
         inboundPolicy: r.inboundPolicy ?? "accept",
         muted: r.muted,
         pid: r.pid,
+        procStart: r.procStart,
+        instanceId: r.instanceId,
+        started: r.started,
+        lastSeen: r.lastSeen,
+        lastInboxPoll: r.lastInboxPoll,
       };
     })
     .sort((a, b) => a.project.localeCompare(b.project));
@@ -148,10 +223,35 @@ function volume(msgs: StoredMessage[], now: Date, hours = 24): VolumeBucket[] {
   return buckets;
 }
 
-export function buildState(opts: { logLimit?: number } = {}): DashboardState {
+export function buildState(
+  opts: {
+    logLimit?: number;
+    project?: string;
+    registrations?: Registration[];
+    processes?: ProcessScan;
+    registrationsReliable?: boolean;
+    sourceMode?: "live-filesystem" | "filesystem-snapshot";
+    presenceFresh?: boolean;
+    presenceGeneratedAt?: number | null;
+    processEvidenceFresh?: boolean;
+    processEvidenceGeneratedAt?: number | null;
+  } = {},
+): DashboardState {
   const logLimit = opts.logLimit ?? 60;
-  const msgs = readAllMessages();
+  const msgs = readAllMessages().filter(
+    (message) => !opts.project || message.project === opts.project,
+  );
   const now = new Date();
+  const live = (opts.registrations ?? listLive()).filter(
+    (registration) => !opts.project || registration.cwd === opts.project,
+  );
+  const coordination = listCoordination({
+    ...(opts.project ? { project: opts.project } : { allProjects: true }),
+    registrations: live,
+    registrationsReliable: opts.registrationsReliable,
+    ...(opts.processes ? { processes: opts.processes } : {}),
+  });
+  const leases = activeWork(coordination);
   const log: LogEntry[] = msgs
     .slice(-logLimit)
     .reverse()
@@ -163,16 +263,72 @@ export function buildState(opts: { logLimit?: number } = {}): DashboardState {
       preview: preview(m.message),
     }));
   return {
+    schemaVersion: 1,
+    generatedAt: now.toISOString(),
+    source: {
+      mode: opts.sourceMode ?? "live-filesystem",
+      presence:
+        opts.sourceMode === "filesystem-snapshot"
+          ? "presence-snapshot"
+          : "live-registry",
+      coordination: "filesystem",
+      messages: "spool",
+    },
+    freshness: {
+      presence: opts.presenceFresh ?? true,
+      presenceGeneratedAt: opts.presenceGeneratedAt ?? null,
+      processEvidence: opts.processEvidenceFresh ?? true,
+      processEvidenceGeneratedAt: opts.processEvidenceGeneratedAt ?? null,
+    },
     now: now.toISOString(),
     totals: {
       messages: msgs.length,
       projects: new Set(msgs.map((m) => m.project)).size,
       threads: new Set(msgs.map((m) => m.threadId ?? m.id)).size,
-      live: listLive().length,
+      live: live.length,
+      work: leases.length,
+      claims: coordination.filter((entry) => entry.kind !== "work").length,
+      coordination: coordination.length,
     },
-    presence: presence(),
+    presence: presence(live),
+    work: leases,
+    coordination,
     routes: routes(msgs),
     log,
     volume: volume(msgs, now),
+    messages: msgs.slice(-logLimit).reverse(),
+    transfers: transfers.list(opts.project),
   };
+}
+
+/** Stable, non-mutating state aggregation for automation and the HTTP API. */
+export function buildReadOnlyState(
+  opts: { logLimit?: number; project?: string; nowMs?: number } = {},
+): DashboardState {
+  const nowMs = opts.nowMs ?? Date.now();
+  const project = opts.project ? canonicalProject(opts.project) : undefined;
+  const listener = readListenerSnapshot(project, nowMs);
+  const records = listCoordination({
+    ...(project ? { project } : { allProjects: true }),
+    registrations: listener.sessions,
+    registrationsReliable: listener.fresh,
+    processes: { processes: new Map(), reliable: false },
+  });
+  const ownerPids = records
+    .map((record) => record.owner)
+    .filter((owner) => !owner.sessionId && owner.pid !== undefined)
+    .map((owner) => owner.pid as number);
+  const processReport = readProcessSnapshot(ownerPids, nowMs);
+  return buildState({
+    logLimit: opts.logLimit,
+    project,
+    registrations: listener.sessions,
+    registrationsReliable: listener.fresh,
+    processes: processReport.evidence,
+    sourceMode: "filesystem-snapshot",
+    presenceFresh: listener.fresh,
+    presenceGeneratedAt: listener.generatedAt,
+    processEvidenceFresh: processReport.fresh,
+    processEvidenceGeneratedAt: processReport.generatedAt,
+  });
 }
