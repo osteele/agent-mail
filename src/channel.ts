@@ -29,6 +29,11 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import {
+  describeChannelPush,
+  diagnoseChannelPush,
+  pushReceiptDetail,
+} from "./channelIdentity.ts";
+import {
   type Claim,
   ClaimConflictError,
   type PathClaimTarget,
@@ -137,6 +142,23 @@ const claimOwner = {
 };
 const workOwner: WorkOwner = claimOwner;
 let hostClient: string | undefined;
+
+// Whether our channel pushes can be authorized by the host. Computed once at
+// startup: our identity is fixed by how we were spawned, and the host's
+// channels flag is fixed by how it was launched. A "pushed" receipt is only
+// evidence of delivery when this is "authorized" — see channelIdentity.ts.
+const hostScan = scanProcesses([process.ppid]);
+const channelPush = diagnoseChannelPush({
+  hostCommand: hostScan.reliable
+    ? hostScan.processes.get(process.ppid)?.command
+    : undefined,
+  pluginRoot: process.env.CLAUDE_PLUGIN_ROOT,
+  serverName: "agent-mail",
+});
+{
+  const warning = describeChannelPush(channelPush);
+  if (warning) console.error(`agent-mail: ${warning}`);
+}
 
 const admissionOptions: AdmissionOptions = {
   duplicateWindowSeconds: config.duplicateWindowSeconds,
@@ -1397,7 +1419,7 @@ async function pushMessage(
       },
     },
   });
-  recordReceipt(receipts, msg.id, "pushed");
+  recordReceipt(receipts, msg.id, "pushed", pushReceiptDetail(channelPush));
 }
 
 async function settleHeld(
