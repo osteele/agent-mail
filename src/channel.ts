@@ -724,10 +724,33 @@ function withConflictGuidance<T>(project: string, operation: () => T): T {
   }
 }
 
-async function deliver(msg: Message): Promise<string> {
+/** Who this send reaches, as of now. A broadcast is counted against the live
+ * sessions in the target project, excluding ourselves — a message is not
+ * visible to its own sender. The count is an estimate at send time, not a
+ * delivery confirmation: a session that attaches later still reads it from the
+ * spool, and one that is attached now may never be pushed to. */
+function describeAudience(target: string, toSession?: string): string {
+  const peers = liveSessions(target);
+  if (toSession) {
+    const match = peers.find((peer) => peer.sessionId === toSession);
+    return `to ${match?.displayName ?? toSession}`;
+  }
+  const others = peers.filter((peer) => peer.sessionId !== sessionId);
+  if (others.length === 0) {
+    return `no sessions listening in ${displayName(target)} — it will be read when one attaches`;
+  }
+  return `to ${others.length} live session${others.length === 1 ? "" : "s"} in ${displayName(target)}`;
+}
+
+async function deliver(msg: Message, audience: string): Promise<string> {
   // Prefer the daemon; fall back to direct append. Keep the tool result about
   // durable delivery only: integration-side mirrors are not useful context for
   // the sending agent and tend to get repeated in its user-facing report.
+  //
+  // "duplicate" means the identical message is already in the spool, so the
+  // send succeeded earlier — say that outright. Phrased as a suppression it
+  // reads as a failure, and senders were calling delivery_status after every
+  // one to find out which it was.
   try {
     const resp = await fetch(`http://127.0.0.1:${config.port}/notify`, {
       method: "POST",
@@ -738,8 +761,8 @@ async function deliver(msg: Message): Promise<string> {
     if (resp.ok) {
       const result = (await resp.json()) as { status?: string; id?: string };
       return result.status === "duplicate"
-        ? `duplicate suppressed (message ${result.id})`
-        : `spooled as ${result.id ?? "unknown"}`;
+        ? `already sent as ${result.id}, ${audience}; this duplicate was not spooled again`
+        : `spooled as ${result.id ?? "unknown"}, ${audience}`;
     }
   } catch {
     // daemon down; fall through
@@ -749,9 +772,9 @@ async function deliver(msg: Message): Promise<string> {
     return `rate limited; retry in ${result.retryAfterSeconds}s`;
   }
   if (result.status === "duplicate") {
-    return `duplicate suppressed (message ${result.id})`;
+    return `already sent as ${result.id}, ${audience}; this duplicate was not spooled again`;
   }
-  return `spooled as ${result.id}`;
+  return `spooled as ${result.id}, ${audience}`;
 }
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
@@ -822,27 +845,34 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       }
       meta.toSession = matches[0].sessionId;
     }
-    const status = await deliver({
-      ts: new Date().toISOString(),
-      from: cwd,
-      project: target,
-      message,
-      delivery: "mail",
-      origin: {
-        kind: "agent",
-        transport: "mcp",
-        ...(hostClient ? { client: hostClient } : {}),
-        sessionId,
-        authority: "untrusted",
+    const status = await deliver(
+      {
+        ts: new Date().toISOString(),
+        from: cwd,
+        project: target,
+        message,
+        delivery: "mail",
+        origin: {
+          kind: "agent",
+          transport: "mcp",
+          ...(hostClient ? { client: hostClient } : {}),
+          sessionId,
+          authority: "untrusted",
+        },
+        ...(idempotency_key ? { idempotencyKey: idempotency_key } : {}),
+        ...(typeof ttl_seconds === "number" && ttl_seconds >= 0
+          ? {
+              expiresAt: new Date(
+                Date.now() + ttl_seconds * 1000,
+              ).toISOString(),
+            }
+          : {}),
+        ...(replyTo ? { replyTo } : {}),
+        ...(threadId ? { threadId } : {}),
+        meta,
       },
-      ...(idempotency_key ? { idempotencyKey: idempotency_key } : {}),
-      ...(typeof ttl_seconds === "number" && ttl_seconds >= 0
-        ? { expiresAt: new Date(Date.now() + ttl_seconds * 1000).toISOString() }
-        : {}),
-      ...(replyTo ? { replyTo } : {}),
-      ...(threadId ? { threadId } : {}),
-      meta,
-    });
+      describeAudience(target, meta.toSession),
+    );
     return { content: [{ type: "text", text: status }] };
   }
   if (req.params.name === "list_sessions") {

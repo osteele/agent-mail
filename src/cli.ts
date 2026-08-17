@@ -497,7 +497,7 @@ async function cmdNotify(
       const result = (await resp.json()) as { status?: string; id?: string };
       console.log(
         result.status === "duplicate"
-          ? `duplicate suppressed (${result.id})`
+          ? `already sent as ${result.id}; this duplicate was not spooled again`
           : `spooled ${result.id ?? "unknown"} via daemon`,
       );
       return;
@@ -539,7 +539,7 @@ async function cmdNotify(
     }
     console.log(
       result.status === "duplicate"
-        ? `duplicate suppressed (${result.id})`
+        ? `already sent as ${result.id}; this duplicate was not spooled again`
         : `daemon unreachable; spooled ${result.id} directly (no Slack echo)`,
     );
   }
