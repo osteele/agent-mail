@@ -3,6 +3,7 @@ import {
   addNativeAuditHook,
   claudeRegistrationMatches,
   codexRegistrationMatches,
+  enabledAgentMailPlugin,
   removeNativeAuditHook,
 } from "./integrations.ts";
 
@@ -76,4 +77,27 @@ test("Claude registration matching requires the exact stdio command", () => {
   expect(
     claudeRegistrationMatches(registration, bun, "/other/channel.ts"),
   ).toBe(false);
+});
+
+test("an enabled agent-mail plugin is found under any marketplace", () => {
+  expect(
+    enabledAgentMailPlugin({
+      enabledPlugins: { "other@mkt": true, "agent-mail@osteele-local": true },
+    }),
+  ).toBe("agent-mail@osteele-local");
+});
+
+test("a disabled or absent agent-mail plugin does not count", () => {
+  expect(
+    enabledAgentMailPlugin({ enabledPlugins: { "agent-mail@mkt": false } }),
+  ).toBeUndefined();
+  expect(enabledAgentMailPlugin({ enabledPlugins: {} })).toBeUndefined();
+  expect(enabledAgentMailPlugin({})).toBeUndefined();
+  expect(enabledAgentMailPlugin(undefined)).toBeUndefined();
+});
+
+test("a plugin whose name merely starts with agent-mail does not count", () => {
+  expect(
+    enabledAgentMailPlugin({ enabledPlugins: { "agent-mailer@mkt": true } }),
+  ).toBeUndefined();
 });

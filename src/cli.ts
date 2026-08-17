@@ -65,6 +65,7 @@ import {
   addNativeAuditHook,
   claudeRegistrationMatches,
   codexRegistrationMatches,
+  enabledAgentMailPlugin,
   removeNativeAuditHook,
 } from "./integrations.ts";
 import {
@@ -1239,6 +1240,33 @@ function registerMcpServer(replace: boolean): void {
   >;
   const servers = (doc.mcpServers ?? {}) as Record<string, unknown>;
   const existing = servers["agent-mail"];
+  // The plugin already provides this server. Adding a user-scope entry under
+  // the same name wins Claude's dedup and demotes the channel identity from
+  // plugin:agent-mail@<marketplace> to server:agent-mail, which the channels
+  // allowlist does not cover — push then fails silently. Withdraw instead, and
+  // take our own stale entry with us.
+  const plugin = enabledAgentMailPlugin(readClaudeSettings());
+  if (plugin) {
+    if (!existing) {
+      console.log(
+        `plugin ${plugin} is enabled and provides agent-mail; skipping user-scope mcpServers entry`,
+      );
+      return;
+    }
+    if (claudeRegistrationMatches(existing, bunPath(), CHANNEL_TS)) {
+      const { "agent-mail": _removed, ...rest } = servers;
+      doc.mcpServers = rest;
+      writeFileSync(CLAUDE_JSON, JSON.stringify(doc, null, 2));
+      console.log(
+        `plugin ${plugin} is enabled; removed the redundant user-scope agent-mail entry (it shadowed the plugin and silently broke channel push). Restart Claude sessions to pick this up.`,
+      );
+      return;
+    }
+    console.error(
+      `plugin ${plugin} is enabled, but ${CLAUDE_JSON} has a different agent-mail mcpServers entry that shadows it and silently breaks channel push. Remove that entry by hand, or run \`claude mcp remove agent-mail\`.`,
+    );
+    return;
+  }
   if (existing) {
     if (claudeRegistrationMatches(existing, bunPath(), CHANNEL_TS)) {
       console.log("Claude MCP registration already matches this checkout");

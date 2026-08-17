@@ -442,6 +442,19 @@ Codex entry with `codex mcp get agent-mail --json`. Use `--replace-codex` or
 `--replace-claude` to replace an entry deliberately. Use `--no-codex` to skip
 Codex registration.
 
+When the `agent-mail` plugin is enabled in `~/.claude/settings.json`, the
+installer does not write a user-scope `mcpServers` entry, and removes one that
+belongs to this checkout. Both register the same server name, so Claude keeps
+only one — the user-scope entry. That instance pushes under the channel identity
+`server:agent-mail` rather than `plugin:agent-mail@<marketplace>`, which the
+host has not authorized, so every push is discarded without an error while tools
+and the CLI keep working. If the entry points at a different checkout, the
+installer reports it and leaves it in place; remove it with `claude mcp remove
+agent-mail`. Restart Claude sessions afterward.
+
+Each session's MCP server log records this at startup when push cannot land,
+naming the identity it would push under and the channels the host authorized.
+
 Claude Code's channel flag bypasses the research-preview allowlist for the
 named local server. It enables channel push without changing the MCP tools.
 

@@ -90,6 +90,23 @@ export function codexRegistrationMatches(
   );
 }
 
+/** The enabled `agent-mail@<marketplace>` plugin key, if any.
+ *
+ * A user-scope `mcpServers` entry and the plugin register the same server name,
+ * so Claude dedupes them and the user-scope entry wins. That instance's channel
+ * identity is `server:agent-mail`, which the channels allowlist does not cover,
+ * so its pushes are dropped without an error. Installing the user-scope entry
+ * alongside an enabled plugin therefore breaks push — check for the plugin
+ * first. */
+export function enabledAgentMailPlugin(settings: unknown): string | undefined {
+  if (!isObject(settings)) return undefined;
+  const plugins = settings.enabledPlugins;
+  if (!isObject(plugins)) return undefined;
+  return Object.keys(plugins).find(
+    (key) => plugins[key] === true && key.split("@", 1)[0] === "agent-mail",
+  );
+}
+
 /** Whether a Claude user-scope mcpServers entry belongs to this checkout. */
 export function claudeRegistrationMatches(
   value: unknown,
