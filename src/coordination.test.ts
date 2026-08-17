@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClaimStore } from "./claims.ts";
 import {
+  coordinationConflictAdvice,
   listCoordination,
   ownerStatus,
   recordForcedRecovery,
@@ -258,6 +259,51 @@ test("coordination conditions preserve the different resource lifecycles", () =>
   expect(entries.find((entry) => entry.id === experiment.id)?.condition).toBe(
     "materialized",
   );
+});
+
+test("live-owner conflict advice only offers a transfer for work leases", () => {
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-coordination-"));
+  temporaryDirectories.push(root);
+  const project = join(root, "project");
+  const notebook = join(project, "lab-notebook");
+  mkdirSync(join(notebook, "experiments"), { recursive: true });
+  const claimStore = new ClaimStore(join(root, "claims"));
+  const workStore = new WorkStore(join(root, "work"));
+  const owner = {
+    id: "session-a",
+    label: "Quiet Lantern",
+    sessionId: "session-a",
+    pid: process.pid,
+  };
+  const registration: Registration = {
+    cwd: project,
+    pid: process.pid,
+    sessionId: "session-a",
+    started: "2026-08-17T00:00:00.000Z",
+  };
+  claimStore.claimExperiment(project, notebook, owner);
+  claimStore.claimPath(project, join(project, "notes.md"), "file", owner);
+  workStore.acquire(project, { type: "research-plan", key: "plan" }, owner);
+
+  const advice = new Map(
+    listCoordination({
+      project,
+      registrations: [registration],
+      claimStore,
+      workStore,
+    }).map((entry) => {
+      expect(entry.ownerStatus).toBe("live");
+      return [entry.kind, coordinationConflictAdvice(entry)];
+    }),
+  );
+
+  expect(advice.get("work")).toContain("request_coordination_transfer");
+  for (const kind of ["path-claim", "experiment-claim"] as const) {
+    const text = advice.get(kind) ?? "";
+    expect(text).not.toContain("request_coordination_transfer");
+    expect(text).toContain("not transferable");
+    expect(text).toContain("Quiet Lantern");
+  }
 });
 
 test("recordForcedRecovery appends one JSON line per forced recovery", () => {

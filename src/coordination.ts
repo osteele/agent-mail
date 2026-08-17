@@ -351,7 +351,13 @@ export function coordinationConflictAdvice(entry: CoordinationEntry): string {
   if (entry.ownerStatus === "manual") {
     return "owner is deliberately manual; ask the operator to release it";
   }
-  return "owner is live; use request_coordination_transfer for an auditable handoff";
+  // Only work leases are transferable; request_coordination_transfer answers
+  // "work lease not found" for claims, so name the mechanism that actually
+  // exists for each kind.
+  if (entry.kind === "work") {
+    return "owner is live; use request_coordination_transfer for an auditable handoff";
+  }
+  return `owner is live; ${entry.kind === "path-claim" ? "path claims" : "experiment reservations"} are not transferable — send_mail to ${entry.owner.label} asking it to release ${entry.id}, or ask the operator to authorize agent-mail coordination recover --id ${entry.id} --authority <who>`;
 }
 
 /** Durable trace of a recovery that bypassed the liveness proof. */
