@@ -107,12 +107,17 @@ export function channelsEnabledIn(settings: unknown): boolean | undefined {
 /** Query the two external sources. Unreachable sources read as unknown. */
 export function inspectChannelSetup(serverPath: string): ChannelSetupFacts {
   let plugin: InstalledChannelPlugin | null | undefined;
-  const listed = Bun.spawnSync(["claude", "plugin", "list", "--json"], {
-    stdout: "pipe",
-    stderr: "ignore",
-  });
-  if (listed.exitCode === 0) {
-    plugin = findChannelPlugin(listed.stdout.toString(), serverPath);
+  try {
+    const listed = Bun.spawnSync(["claude", "plugin", "list", "--json"], {
+      stdout: "pipe",
+      stderr: "ignore",
+    });
+    if (listed.exitCode === 0) {
+      plugin = findChannelPlugin(listed.stdout.toString(), serverPath);
+    }
+  } catch {
+    // Bun.spawnSync throws when `claude` is not on PATH. No CLI means the
+    // plugin state cannot be observed at all: unknown, not absent.
   }
 
   let settings: unknown;
@@ -134,15 +139,23 @@ export function inspectChannelSetup(serverPath: string): ChannelSetupFacts {
   };
 }
 
-/** Human report: what is in place, and the next unmet step if any. */
-export function describeChannelSetup(facts: ChannelSetupFacts): string[] {
+/** Human report: what is in place, and the next unmet step if any.
+ *
+ * `repoRoot`, when known, makes the not-installed instruction pasteable —
+ * the marketplace lives at this repo's root. */
+export function describeChannelSetup(
+  facts: ChannelSetupFacts,
+  repoRoot?: string,
+): string[] {
   const lines: string[] = ["Channel push (Claude Code):"];
 
   if (facts.plugin === undefined) {
     lines.push("  plugin:   unknown — could not run `claude plugin list`");
   } else if (facts.plugin === null) {
     lines.push("  plugin:   not installed — no plugin serves this channel");
-    lines.push("            claude plugin marketplace add <this repo>");
+    lines.push(
+      `            claude plugin marketplace add ${repoRoot ?? "<this repo>"}`,
+    );
     lines.push("            claude plugin install agent-mail@osteele-local");
   } else if (!facts.plugin.enabled) {
     lines.push(`  plugin:   ${facts.plugin.id} installed but disabled`);

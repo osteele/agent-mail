@@ -44,6 +44,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { describeChannelSetup, inspectChannelSetup } from "./channelSetup.ts";
 import {
   type Claim,
   ClaimConflictError,
@@ -336,6 +337,13 @@ async function cmdStatus(): Promise<void> {
     console.log(
       `  ${sessionLabel(r, names)}${capabilityTag(r)} — ${r.cwd} (pid ${r.pid}) [${sessionActivity(r, names)}] [inbound:${r.inboundPolicy ?? "accept"}]${r.muted ? " [muted]" : ""}`,
     );
+  // Observed state, not instructions; ~2s (`claude plugin list`), so explicit
+  // commands only — never the status line or other latency-bound surfaces.
+  for (const line of describeChannelSetup(
+    inspectChannelSetup(CHANNEL_TS),
+    dirname(SRC_DIR),
+  ))
+    console.log(line);
 }
 
 function cmdLogs(follow: boolean): void {
@@ -1472,10 +1480,14 @@ function cmdInstall(flags: Record<string, string | boolean>): void {
     registerCodex(flags["replace-codex"] === true);
   }
   if (flags["native-audit"] === true) installNativeAuditHook();
-  console.log(
-    "\nTo receive push events, launch Claude Code with:\n" +
-      "  claude --dangerously-load-development-channels server:agent-mail",
-  );
+  // Post-check: report the observed channel opt-in state. Instructions printed
+  // here go stale; the state cannot (see channelSetup.ts).
+  console.log("");
+  for (const line of describeChannelSetup(
+    inspectChannelSetup(CHANNEL_TS),
+    dirname(SRC_DIR),
+  ))
+    console.log(line);
 }
 
 function cmdUninstall(): void {
