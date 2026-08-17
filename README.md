@@ -298,7 +298,13 @@ For this to work the caller has to know the session id. Agents that export one
 into their subprocesses (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`) supply it
 directly. kimi and opencode export none, so `agent-command-guards`' launcher
 mints `AGENT_SESSION_ID` for them; without it those sessions cannot be addressed
-individually at all.
+individually at all. weft records the submitting session at `weft run` time and
+passes it back as `--session` when a job finishes.
+
+When testing session addressing, have a listener attached under the addressed
+session id: the broadcast fallback means addressing an absent session is
+indistinguishable from not addressing at all — that's the fallback working, not
+the feature failing.
 
 ### Coordination claims
 
