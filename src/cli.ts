@@ -61,6 +61,7 @@ import {
 } from "./coordination.ts";
 import { openBrowser, serveDashboard } from "./dashboard.ts";
 import { buildReadOnlyState } from "./dashboardData.ts";
+import { classifyFallback, withAttemptKey } from "./delivery.ts";
 import {
   addNativeAuditHook,
   claudeRegistrationMatches,
@@ -121,7 +122,11 @@ function capabilityTag(r: Registration): string {
   const capabilities = r.capabilities;
   if (!capabilities) return "";
   const labels = [
-    capabilities.channelPush ? "channel" : "poll",
+    capabilities.channelPush
+      ? capabilities.hostChannelLoaded === false
+        ? "channel:host-not-loaded"
+        : "channel"
+      : "poll",
     capabilities.nativePeerMessaging ? "native-peer" : undefined,
     capabilities.claims ? "claims" : undefined,
     capabilities.workLeases ? "work" : undefined,
@@ -471,10 +476,14 @@ async function cmdNotify(
     }
   }
   const meta = toSession ? { toSession } : undefined;
-  const body = JSON.stringify({
+  // One message, used for both the daemon POST and the fallback append. The
+  // attempt key is what lets the fallback recognise a message the daemon had
+  // already stored before its reply went missing.
+  const attempt = withAttemptKey({
+    ts: new Date().toISOString(),
+    from,
     project: resolvedProject,
     message,
-    from,
     origin: {
       kind: "automation",
       transport: "cli",
@@ -482,9 +491,12 @@ async function cmdNotify(
     },
     ...(meta ? { meta } : {}),
     ...(idempotencyKey ? { idempotencyKey } : {}),
-    ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
     ...(replyTo ? { replyTo } : {}),
     ...(suppressSlack ? { slackEcho: false } : {}),
+  });
+  const body = JSON.stringify({
+    ...attempt,
+    ...(ttlSeconds !== undefined ? { ttlSeconds } : {}),
   });
   try {
     const resp = await fetch(`http://127.0.0.1:${config.port}/notify`, {
@@ -505,43 +517,49 @@ async function cmdNotify(
     console.error(`daemon error: HTTP ${resp.status} ${await resp.text()}`);
     process.exit(1);
   } catch {
-    // Daemon down: append directly so the message is not lost.
-    const result = appendMessageGuarded(
-      {
-        ts: new Date().toISOString(),
-        from,
-        project: resolvedProject,
-        message,
-        origin: {
-          kind: "automation",
-          transport: "cli",
-          authority: "untrusted",
+    // The daemon gave no usable answer. It may still have appended the message
+    // and lost only the reply, so the outcome below distinguishes that from a
+    // genuine duplicate rather than reporting both as suppressed.
+    const outcome = classifyFallback(
+      appendMessageGuarded(
+        {
+          ...attempt,
+          ...(ttlSeconds !== undefined
+            ? {
+                expiresAt: new Date(
+                  Date.now() + ttlSeconds * 1000,
+                ).toISOString(),
+              }
+            : {}),
         },
-        ...(meta ? { meta } : {}),
-        ...(idempotencyKey ? { idempotencyKey } : {}),
-        ...(ttlSeconds !== undefined
-          ? {
-              expiresAt: new Date(Date.now() + ttlSeconds * 1000).toISOString(),
-            }
-          : {}),
-        ...(replyTo ? { replyTo } : {}),
-        ...(suppressSlack ? { slackEcho: false } : {}),
-      },
-      {
-        duplicateWindowSeconds: config.duplicateWindowSeconds,
-        messageRateLimitPerMinute: config.messageRateLimitPerMinute,
-        defaultMessageTtlSeconds: config.defaultMessageTtlSeconds,
-      },
+        {
+          duplicateWindowSeconds: config.duplicateWindowSeconds,
+          messageRateLimitPerMinute: config.messageRateLimitPerMinute,
+          defaultMessageTtlSeconds: config.defaultMessageTtlSeconds,
+        },
+      ),
     );
-    if (result.status === "rate_limited") {
-      console.error(`rate limited; retry in ${result.retryAfterSeconds}s`);
-      process.exit(1);
+    switch (outcome.kind) {
+      case "rate_limited":
+        console.error(`rate limited; retry in ${outcome.retryAfterSeconds}s`);
+        process.exit(1);
+        break;
+      case "already-delivered":
+        console.log(
+          `spooled ${outcome.id} via daemon (its reply never arrived)`,
+        );
+        break;
+      case "duplicate":
+        console.log(
+          `already sent as ${outcome.id}; this duplicate was not spooled again`,
+        );
+        break;
+      case "spooled":
+        console.log(
+          `daemon unreachable; spooled ${outcome.id} directly (no Slack echo)`,
+        );
+        break;
     }
-    console.log(
-      result.status === "duplicate"
-        ? `already sent as ${result.id}; this duplicate was not spooled again`
-        : `daemon unreachable; spooled ${result.id} directly (no Slack echo)`,
-    );
   }
 }
 

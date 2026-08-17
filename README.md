@@ -32,16 +32,54 @@ current checkout. Make sure that directory is on `PATH`. `agent-mail install`
 starts the daemon and registers the checkout as an MCP server for Claude Code
 and Codex.
 
-Restart existing Claude Code and Codex sessions after installation. To enable
-channel push in Claude Code, start it with:
+Restart existing Claude Code and Codex sessions after installation.
 
-```bash
-claude --dangerously-load-development-channels server:agent-mail
-```
+### Enabling channel push in Claude Code
 
-Without this flag, Claude Code can use the MCP tools and durable inbox but does
-not receive channel events. Codex supports the tools and durable inbox but not
-channel push.
+The MCP tools and the durable inbox work as soon as the server is registered.
+Channel push — mail arriving in a session's context without the agent asking for
+it — is a separate opt-in with four parts, all of which must line up:
+
+1. **A marketplace and plugin in this repo.** `.claude-plugin/marketplace.json`
+   declares the `osteele-local` marketplace; `plugins/agent-mail/` declares the
+   `agent-mail` plugin, whose `channels` entry names the `agent-mail` MCP server
+   from its `.mcp.json`.
+2. **The marketplace added and the plugin installed**, which `agent-mail
+   install` does not do for you:
+
+   ```bash
+   claude plugin marketplace add /Users/osteele/code/agent-tools/agent-mail
+   claude plugin install agent-mail@osteele-local
+   ```
+
+3. **Channels enabled and this plugin allowed**, in managed settings
+   (`/Library/Application Support/ClaudeCode/managed-settings.json`):
+
+   ```json
+   {
+     "channelsEnabled": true,
+     "allowedChannelPlugins": [
+       { "marketplace": "osteele-local", "plugin": "agent-mail" }
+     ]
+   }
+   ```
+
+4. **Each session launched with the channel loaded:**
+
+   ```bash
+   claude --channels=plugin:agent-mail@osteele-local
+   ```
+
+   This is a per-launch decision, so it is best set once for every session
+   rather than typed. With [claude-wrapper](../claude-wrapper), put it in global
+   `extra_args`; scoping it to some paths is what previously left whole
+   directories silently push-less.
+
+Run `agent-mail status` to see what is actually in place, and `agent-mail
+listeners` to see which live sessions were launched with the channel: one whose
+host was not is tagged `{channel:host-not-loaded}`.
+
+Codex supports the tools and durable inbox but has no channel push at all.
 
 Send a smoke-test message to the current project:
 

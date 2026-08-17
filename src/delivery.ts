@@ -5,8 +5,10 @@
  * or filesystem I/O, so they are suitable for deterministic state-machine tests.
  */
 
+import { randomUUID } from "node:crypto";
 import type { InboundPolicy } from "./registry.ts";
 import {
+  type AdmissionResult,
   type DeliveryReceipt,
   type Message,
   type ReceiptStatus,
@@ -14,6 +16,58 @@ import {
   isExpired,
   messageVisibleToSession,
 } from "./spool.ts";
+
+// --- Sending: daemon first, direct append as fallback ------------------------
+//
+// Both senders (the MCP server and the CLI) POST to the daemon and fall back to
+// appending directly when it gives no usable answer. "No usable answer" is not
+// "did nothing": the daemon may have appended the message and then failed to
+// return the response. The fallback then re-reads the same spool, finds that
+// message, and — before this — reported it as a duplicate, telling the caller
+// their message was dropped when it had in fact been delivered. Those two
+// outcomes call for opposite reactions from the caller, so they must not share
+// a rendering.
+
+/** Stamp a delivery attempt with a token unique to it.
+ *
+ * Independent of any caller-supplied `idempotencyKey`, which is deliberately
+ * reused across retries and so cannot identify one attempt. Stamping
+ * unconditionally means the sender can recognise its own stored message
+ * whether or not the caller asked for idempotency. */
+export function withAttemptKey(
+  msg: Message,
+  key: string = randomUUID(),
+): Message {
+  return { ...msg, attemptKey: key };
+}
+
+export type FallbackOutcome =
+  | { kind: "spooled"; id: string }
+  /** The daemon had already stored this attempt's message; its reply was lost. */
+  | { kind: "already-delivered"; id: string }
+  | { kind: "duplicate"; id: string }
+  | { kind: "rate_limited"; retryAfterSeconds: number };
+
+/** Classify a fallback append, reading a self-collision as delivery.
+ *
+ * Colliding on this attempt's own token can only mean its message reached the
+ * spool through the daemon — nobody else holds that token. Anything else is a
+ * real duplicate. Callers render their own wording; what matters is that
+ * `already-delivered` and `duplicate` stay distinct. */
+export function classifyFallback(result: AdmissionResult): FallbackOutcome {
+  if (result.status === "rate_limited") {
+    return {
+      kind: "rate_limited",
+      retryAfterSeconds: result.retryAfterSeconds,
+    };
+  }
+  if (result.status === "duplicate") {
+    return result.reason === "attempt-key"
+      ? { kind: "already-delivered", id: result.id }
+      : { kind: "duplicate", id: result.id };
+  }
+  return { kind: "spooled", id: result.id };
+}
 
 export const TERMINAL_RECEIPTS: readonly ReceiptStatus[] = [
   "pushed",

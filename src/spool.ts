@@ -37,6 +37,12 @@ export interface Message {
   origin?: MessageOrigin;
   /** Caller-supplied retry key. A repeated key is accepted without re-appending. */
   idempotencyKey?: string;
+  /** Token minted by the sender for one delivery attempt, never reused — unlike
+   * `idempotencyKey`, which a caller reuses deliberately across retries. It
+   * exists so a fallback append can tell a message this very attempt already
+   * got into the spool (via the daemon, whose reply then went missing) from a
+   * genuine duplicate. Set by `withAttemptKey`; not part of the public API. */
+  attemptKey?: string;
   /** ISO timestamp after which channel delivery is skipped. */
   expiresAt?: string;
   /** Per-message Slack routing. Undefined preserves the configured default. */
@@ -77,9 +83,18 @@ export interface AdmissionOptions {
   defaultMessageTtlSeconds: number | null;
 }
 
+/** Which rule rejected an append as a duplicate.
+ *
+ * `attempt-key` is the sender colliding with itself: the token is minted per
+ * attempt and never reused, so a match proves this attempt's own message is
+ * already in the spool — it was delivered, not suppressed. The other two are
+ * genuine duplicates. Callers must keep the cases apart; conflating them tells
+ * a sender its message was dropped when it was delivered. */
+export type DuplicateReason = "attempt-key" | "idempotency-key" | "signature";
+
 export type AdmissionResult =
   | { status: "spooled"; id: string; path: string }
-  | { status: "duplicate"; id: string }
+  | { status: "duplicate"; id: string; reason: DuplicateReason }
   | { status: "rate_limited"; retryAfterSeconds: number };
 
 function messageTime(msg: Message): number {
@@ -110,13 +125,26 @@ export function admissionDecision(
   nowMs = Date.now(),
 ):
   | { status: "accept" }
-  | { status: "duplicate"; id: string }
+  | { status: "duplicate"; id: string; reason: DuplicateReason }
   | { status: "rate_limited"; retryAfterSeconds: number } {
+  // Checked first, and separately from idempotencyKey: this is the sender
+  // finding its own already-stored message, which is a success, not a repeat.
+  if (incoming.attemptKey) {
+    const own = [...recent]
+      .reverse()
+      .find((msg) => msg.attemptKey === incoming.attemptKey);
+    if (own?.id) {
+      return { status: "duplicate", id: own.id, reason: "attempt-key" };
+    }
+  }
+
   if (incoming.idempotencyKey) {
     const prior = [...recent]
       .reverse()
       .find((msg) => msg.idempotencyKey === incoming.idempotencyKey);
-    if (prior?.id) return { status: "duplicate", id: prior.id };
+    if (prior?.id) {
+      return { status: "duplicate", id: prior.id, reason: "idempotency-key" };
+    }
   }
 
   if (options.duplicateWindowSeconds > 0) {
@@ -129,7 +157,9 @@ export function admissionDecision(
           messageTime(msg) >= duplicateCutoff &&
           duplicateSignature(msg) === signature,
       );
-    if (duplicate?.id) return { status: "duplicate", id: duplicate.id };
+    if (duplicate?.id) {
+      return { status: "duplicate", id: duplicate.id, reason: "signature" };
+    }
   }
 
   const minuteCutoff = nowMs - 60_000;
@@ -249,6 +279,27 @@ export function appendReceipt(
   ensureDirs();
   const normalized: DeliveryReceipt = { ...receipt, project };
   appendFileSync(receiptPath(project), `${JSON.stringify(normalized)}\n`);
+}
+
+/** Find a message's receipts wherever they live, with the owning project.
+ *
+ * Receipts are keyed to the *recipient's* project, so a sender querying its own
+ * project for a message it sent always finds nothing — and an empty result reads
+ * as "dropped". Three sessions drew that wrong conclusion in one day, one of
+ * them mid-incident, so locating receipts must not depend on the caller
+ * happening to sit in the recipient's directory. */
+export function findReceipts(
+  messageId: string,
+  fromProject?: string,
+): { project: string; receipts: DeliveryReceipt[] } | undefined {
+  const ordered = fromProject
+    ? [fromProject, ...knownProjects().filter((p) => p !== fromProject)]
+    : knownProjects();
+  for (const project of ordered) {
+    const receipts = readReceipts(project, messageId);
+    if (receipts.length) return { project, receipts };
+  }
+  return undefined;
 }
 
 export function readReceipts(

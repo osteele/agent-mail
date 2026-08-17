@@ -49,10 +49,12 @@ import {
   recoverCoordination,
 } from "./coordination.ts";
 import {
+  classifyFallback,
   decideHeldSettlements,
   decideNewMessageDelivery,
   pendingHeldIds,
   settled,
+  withAttemptKey,
 } from "./delivery.ts";
 import {
   canonicalProject,
@@ -89,6 +91,7 @@ import {
   appendMessage,
   appendMessageGuarded,
   appendReceipt,
+  findReceipts,
   hasReceipt,
   isExpired,
   markMessagesRead,
@@ -751,11 +754,16 @@ async function deliver(msg: Message, audience: string): Promise<string> {
   // send succeeded earlier — say that outright. Phrased as a suppression it
   // reads as a failure, and senders were calling delivery_status after every
   // one to find out which it was.
+  //
+  // The fallback runs whenever the daemon gave no usable answer, which is not
+  // the same as the daemon doing nothing: it may have appended and then failed
+  // to get the response back. `attemptKey` makes that case recognisable.
+  const attempt = withAttemptKey(msg);
   try {
     const resp = await fetch(`http://127.0.0.1:${config.port}/notify`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(msg),
+      body: JSON.stringify(attempt),
       signal: AbortSignal.timeout(3000),
     });
     if (resp.ok) {
@@ -765,16 +773,21 @@ async function deliver(msg: Message, audience: string): Promise<string> {
         : `spooled as ${result.id ?? "unknown"}, ${audience}`;
     }
   } catch {
-    // daemon down; fall through
+    // daemon down, slow, or the response was lost; fall through
   }
-  const result = appendMessageGuarded(msg, admissionOptions);
-  if (result.status === "rate_limited") {
-    return `rate limited; retry in ${result.retryAfterSeconds}s`;
+  const outcome = classifyFallback(
+    appendMessageGuarded(attempt, admissionOptions),
+  );
+  switch (outcome.kind) {
+    case "rate_limited":
+      return `rate limited; retry in ${outcome.retryAfterSeconds}s`;
+    case "already-delivered":
+      return `spooled as ${outcome.id}, ${audience} (the daemon stored it; its reply never arrived)`;
+    case "duplicate":
+      return `already sent as ${outcome.id}, ${audience}; this duplicate was not spooled again`;
+    case "spooled":
+      return `spooled as ${outcome.id}, ${audience}`;
   }
-  if (result.status === "duplicate") {
-    return `already sent as ${result.id}, ${audience}; this duplicate was not spooled again`;
-  }
-  return `spooled as ${result.id}, ${audience}`;
 }
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
@@ -1047,20 +1060,44 @@ mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
       message_id?: string;
       limit?: number;
     };
-    const receipts = readReceipts(cwd, message_id);
+    // Outbound mail's receipts live in the recipient's project, so looking only
+    // here would report every sent message as receipt-less — which reads as
+    // "dropped" and has repeatedly been acted on as such.
+    const found = message_id ? findReceipts(message_id, cwd) : undefined;
+    const receipts = message_id
+      ? (found?.receipts ?? [])
+      : readReceipts(cwd, message_id);
     const selected = receipts.slice(-(limit ?? 50));
+    const elsewhere =
+      found && found.project !== cwd
+        ? `outbound to ${displayName(found.project)}; receipts are recorded there:\n`
+        : "";
+    // `pushed` means the notification was emitted: MCP notifications are
+    // fire-and-forget with no ack, so nothing here can prove it reached a
+    // context. A push with no later `read` is the only observable hint that it
+    // may not have — reported as the weak evidence it is, not as a verdict.
+    const pushedNotRead = selected.some((r) => r.status === "pushed")
+      ? !selected.some((r) => r.status === "read")
+      : false;
+    const unconfirmed = pushedNotRead
+      ? "\nnote: emitted but not yet marked read. `pushed` records that agent-mail sent the notification, which it cannot confirm was surfaced to the session."
+      : "";
     return {
       content: [
         {
           type: "text",
           text: selected.length
-            ? selected
+            ? elsewhere +
+              selected
                 .map(
                   (receipt) =>
                     `${receipt.messageId} ${receipt.status} [${receipt.ts}]${receipt.sessionId ? ` session=${receipt.sessionId}` : ""}${receipt.detail ? ` (${receipt.detail})` : ""}`,
                 )
-                .join("\n")
-            : "no delivery receipts",
+                .join("\n") +
+              unconfirmed
+            : message_id
+              ? `no receipts recorded for ${message_id} in any known project. A message is only receipt-less if it never reached a spool; check the id.`
+              : "no delivery receipts",
         },
       ],
     };

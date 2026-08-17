@@ -652,3 +652,74 @@ test("notify --session addresses one live session instead of broadcasting", asyn
     rmSync(root, { recursive: true });
   }
 });
+
+test("notify reports delivery when the daemon stored the message but lost its reply", async () => {
+  // The observed defect. The daemon appended the message and then failed to
+  // return a response; the CLI fell back to a direct append, found the daemon's
+  // own line in the shared spool, and reported "duplicate suppressed" — telling
+  // the caller their message was dropped when it had been delivered. Those call
+  // for opposite reactions, so they must not render the same.
+  const root = mkdtempSync(join(tmpdir(), "agent-mail-lost-reply-"));
+  const home = join(root, "home");
+  const project = join(root, "project");
+  const inbox = join(home, ".claude", "agent-mail", "inbox");
+  mkdirSync(project, { recursive: true });
+  mkdirSync(inbox, { recursive: true });
+  const canonical = realpathSync(project);
+  const spool = join(inbox, `${projectSlug(canonical)}.jsonl`);
+
+  // Stands in for the daemon: append exactly what it would have appended, then
+  // never answer, so the client times out the way it did in the field.
+  const server = Bun.serve({
+    port: 0,
+    async fetch(request) {
+      const sent = (await request.json()) as { attemptKey?: string };
+      writeFileSync(
+        spool,
+        `${JSON.stringify({
+          id: "daemon-stored-id",
+          ts: new Date().toISOString(),
+          from: "cli",
+          project: canonical,
+          message: "job done",
+          attemptKey: sent.attemptKey,
+        })}\n`,
+      );
+      return await new Promise<Response>(() => {});
+    },
+  });
+
+  try {
+    const child = Bun.spawn(
+      [
+        process.execPath,
+        join(import.meta.dir, "cli.ts"),
+        "notify",
+        "--project",
+        project,
+        "--message",
+        "job done",
+      ],
+      {
+        env: {
+          ...process.env,
+          HOME: home,
+          AGENT_MAIL_PORT: String(server.port),
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    expect(await child.exited).toBe(0);
+    const out = await new Response(child.stdout).text();
+    expect(out).toContain("daemon-stored-id");
+    expect(out).not.toContain("duplicate suppressed");
+
+    // And the guard still did its job: one copy in the spool, not two.
+    const lines = readFileSync(spool, "utf8").trim().split("\n");
+    expect(lines).toHaveLength(1);
+  } finally {
+    server.stop(true);
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 20000);

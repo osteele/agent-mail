@@ -170,6 +170,9 @@ const server = Bun.serve({
           authority: "untrusted",
         },
         ...(body.idempotencyKey ? { idempotencyKey: body.idempotencyKey } : {}),
+        // Stored verbatim: the sender matches against it if it has to fall back
+        // to a direct append after losing this response.
+        ...(body.attemptKey ? { attemptKey: body.attemptKey } : {}),
         ...(ttlSeconds !== undefined
           ? { expiresAt: new Date(now + ttlSeconds * 1000).toISOString() }
           : body.expiresAt

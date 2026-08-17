@@ -56,6 +56,14 @@ export interface SessionCapabilities {
   workLeases: boolean;
   receipts: boolean;
   nativePeerMessaging: boolean;
+  /** Whether the host process was launched with an agent-mail channel flag.
+   *
+   * `channelPush` says this server will emit a notification; this says anything
+   * is listening for it. They diverged silently for days: mail spooled, a
+   * `pushed` receipt was written, and nothing reached the session, because the
+   * host had loaded no agent-mail channel. Undefined when process inspection is
+   * unavailable — never treat that as false. */
+  hostChannelLoaded?: boolean;
 }
 
 export interface ProcessInfo {
