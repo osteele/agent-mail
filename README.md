@@ -16,6 +16,11 @@ agent-mail runs from a source checkout and requires
 [Bun](https://bun.com/docs/installation). Its automatic daemon installer
 currently uses macOS launchd.
 
+**Platforms.** macOS and Linux are tested in CI. Windows is unsupported:
+session liveness is read from `ps`, and without it the registry cannot prune
+sessions or expire claims. See
+[docs/decisions/0005](docs/decisions/0005-no-windows-support.md).
+
 From the checkout:
 
 ```bash
@@ -202,13 +207,28 @@ session-targeted message is visible only to the addressed session. The CLI
 `agent-mail inbox` and HTTP `/inbox` endpoint are project-spool views and show
 the stored messages without session-local filtering.
 
-Each session also records its **host client**, either `claude-code` or `codex`,
-and capabilities such as `channel`, `poll`, `native-peer`, `claims`, `work`,
-and `receipts`. The MCP handshake and environment supply these values. They appear
-in `status`, `listeners`, `list_sessions`, and both dashboards. Agents can use
-native peer messaging when the target advertises it. Otherwise, they can use
-channel push or durable polling. Codex sets no session environment variable,
-so each Codex MCP process receives a random ID and generated name.
+Each session also records its **host client**, the name the client reports in the
+MCP handshake: `claude-code`, `codex`, `kimi-code`, and `opencode` are the ones
+seen in practice. Alongside it are capabilities such as `channel`, `poll`,
+`native-peer`, `claims`, `work`, and `receipts`. They appear in `status`,
+`listeners`, `list_sessions`, and both dashboards. Agents can use native peer
+messaging when the target advertises it. Otherwise, they can use channel push or
+durable polling.
+
+Channel push exists only under Claude Code, so a session under any other client
+is tagged `poll`. A Claude Code session can also hold a channel it cannot use,
+and is then tagged `channel:host-not-loaded` (its host was launched without the
+channel flag) or `channel:identity-unauthorized` (the host will not authorize
+this server's identity). Both mean the same thing to a sender: that session's
+mail waits for its next inbox check.
+
+Session identity comes from the environment, in the order
+`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`, `AGENT_SESSION_ID`. Native ids come
+first, since an agent that mints its own knows more than a launcher wrapping it
+does. kimi and opencode set no id of their own, so a launcher exports
+`AGENT_SESSION_ID` before starting them. Without one, a session receives a
+random ID that no sibling process can learn, which leaves project-wide broadcast
+as the only way to reach it.
 
 ### Presence
 
@@ -262,6 +282,15 @@ Senders can supply an idempotency key and TTL. agent-mail also suppresses
 identical bodies from one sender during a short window and applies a rolling
 per-sender rate limit. Set either limit to zero to disable it. Expired and
 native-audit messages remain visible to dashboards but never enter an inbox.
+
+A send reports which of these happened. `spooled as <id>` stored a new message.
+`already sent as <id>` found an identical body from the same sender inside the
+duplicate window, so the copy already in the spool stands and this one was
+dropped. `spooled as <id> (an earlier attempt of this send reached the spool)`
+is neither: the sender met its own earlier attempt, whose reply was lost in
+transit, and the message is stored exactly once. `rate limited; retry in <n>s`
+stored nothing. Through the MCP tool, each of these also names the audience, and
+counts any recipients whose channel push cannot reach them.
 
 Use the `delivery_status` MCP tool or `agent-mail receipts` to inspect the
 append-only state changes. A `spooled` receipt confirms durable local storage.
@@ -665,9 +694,9 @@ disambiguation, and a name that came and went as peers appeared would be worse
 than one that is simply always there. It prints nothing only when the payload
 carries no session id.
 
-`--fields` prints one tab-separated line instead — `name`, peer count, unread
-messages, and whether mail reaches this session on its own — so a status line
-can show all four from a single invocation rather than reimplementing
+`--fields` prints one tab-separated line instead, carrying the name, peer count,
+unread messages, and whether mail reaches this session on its own. A status line
+can then show all four from a single invocation, rather than reimplementing
 agent-mail's registry and spool semantics in shell:
 
 ```
@@ -683,8 +712,8 @@ to be pulling: a host that is not Claude Code has no channel at all, so every
 Codex, kimi, and opencode session is pull-only by construction; and a Claude
 Code session can hold a channel it cannot use, because its host was launched
 without the flag or under an identity the host will not authorize. They differ
-in how you repair them — `agent-mail status` says which — but not in what a
-reader needs to do, which is to check mail rather than wait for it. A session
+in how you repair them, and `agent-mail status` says which. They do not differ in
+what a reader needs to do, which is to check mail rather than wait for it. A session
 cannot see any of this about itself: it emits successfully and hears no
 complaint.
 
@@ -737,14 +766,18 @@ Then point `statusLine` at it in `~/.claude/settings.json`:
   before each run, and the value tracks the pane the session is actually in
   (v2.1.153+). `tput cols` cannot work: the script's output is captured rather
   than connected to the terminal. `LINES` is the terminal height, not a row
-  allowance — every row taken is a row of transcript lost.
+  allowance. Every row taken is a row of transcript lost.
 - **The exit code is always 0.** This includes errors, so `$(...)` stays safe
   under `set -e`. Empty output means "nothing to show."
 - Claude Code cancels a status line command when the next update arrives. A
   canceled script drops the whole line, so the script must finish well within
   the 300 ms debounce. `status-line` reads the daemon's presence snapshot (see
-  below) and costs about 40 ms. Most of that time is process startup. With the
-  daemon stopped, it uses a project-scoped scan that costs about 50 ms.
+  below), and `--fields` also scans the project spool for the unread count;
+  together they cost roughly 100 ms on an unloaded machine, most of it process
+  startup. With the daemon stopped, a project-scoped process scan replaces the
+  snapshot read. Measure on a quiet machine: under heavy load every part of this
+  slows by the same large factor, so a figure taken then describes the load
+  rather than the command.
 
 The daemon republishes the pid-verified live registry to
 `~/.claude/agent-mail/presence.json` every 10 seconds. This snapshot lets

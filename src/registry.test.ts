@@ -249,6 +249,11 @@ test("listLiveInProject collapses legacy and canonical spellings of one dir", ()
   const link = join(root, "link");
   symlinkSync(real, link);
 
+  // The registry directory exists on any machine that has run agent-mail, so
+  // this test passed locally while failing on a clean checkout. Writing into a
+  // shared directory means creating it first, not assuming a prior run.
+  mkdirSync(REGISTRY_DIR, { recursive: true });
+
   const written: string[] = [];
   try {
     for (const [cwd, sessionId] of [
