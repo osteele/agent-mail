@@ -2,6 +2,7 @@
   "name": "agent-mail",
   "version": "0.1.0",
   "description": "Durable local messaging and coordination for Claude Code and Codex agents",
+  "license": "MIT",
   "type": "module",
   "bin": {
     "agent-mail": "src/cli.ts"
