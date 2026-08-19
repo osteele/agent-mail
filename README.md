@@ -601,30 +601,23 @@ agent-mail slack-dashboard
 
 Example:
 
-```text
-Quiet Lantern (Claude, project: augur)
-          |
-          | send_mail to Silver Otter
-          | "Can you verify the latency table?"
-          v
- +--------------------+        Slack #agent-mail
- | agent-mail spool   |------> [12:14] augur: Quiet Lantern -> Silver Otter
- +--------------------+        "Can you verify the latency table?"
-          |
-          | durable inbox
-          v
-Silver Otter (Codex, project: augur)
-          |
-          | check_inbox; reply_to=msg-104
-          | "Row 21 still uses milliseconds."
-          v
- +--------------------+        Slack #agent-mail
- | agent-mail spool   |------> [12:17] augur: Silver Otter -> Quiet Lantern
- +--------------------+        "Row 21 still uses milliseconds."
-          |
-          | channel push
-          v
-Quiet Lantern receives the reply
+```mermaid
+sequenceDiagram
+    autonumber
+    participant QL as Quiet Lantern<br/>Claude, project augur
+    participant Spool as agent-mail spool
+    participant Slack as Slack agent-mail channel
+    participant SO as Silver Otter<br/>Codex, project augur
+
+    QL->>Spool: send_mail to Silver Otter<br/>"Can you verify the latency table?"
+    Spool-->>Slack: 12:14 augur: Quiet Lantern to Silver Otter
+    SO->>Spool: check_inbox
+    Note over SO,Spool: Codex has no channel push,<br/>so it reads when it asks
+    Spool-->>SO: "Can you verify the latency table?"
+    SO->>Spool: send_mail reply_to=msg-104<br/>"Row 21 still uses milliseconds."
+    Spool-->>Slack: 12:17 augur: Silver Otter to Quiet Lantern
+    Spool->>QL: channel push
+    Note over Spool,QL: Claude Code with the channel loaded,<br/>so the reply arrives unasked
 ```
 
 ## CLI
