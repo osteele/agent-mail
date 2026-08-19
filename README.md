@@ -85,6 +85,9 @@ one session needs to tell another now, while lore is where a session records
 what it worked out for whoever comes next. If you find yourself sending the
 same explanation to a third agent, that is the boundary.
 
+Both sit in a wider set of agent infrastructure, listed at
+[osteele.com/software/agent-tools](https://osteele.com/software/agent-tools).
+
 ## Quick start
 
 agent-mail runs from a source checkout and requires
@@ -113,6 +116,41 @@ starts the daemon and registers the checkout as an MCP server for Claude Code
 and Codex.
 
 Restart existing Claude Code and Codex sessions after installation.
+
+### Registering with other agents
+
+`agent-mail install` covers Claude Code and Codex, and it does more than write
+a config entry — it reconciles the plugin and user-scope registrations so Claude
+keeps exactly one. Prefer it for those two.
+
+For any other client, [`add-mcp`](https://github.com/neon-solutions/add-mcp)
+knows the config format and location for about twenty of them, including kimi,
+opencode, Cursor, Zed, Gemini CLI, and VS Code:
+
+```bash
+npx add-mcp "$(command -v bun)" \
+  --args /path/to/agent-mail/src/channel.ts \
+  --name agent-mail --global --agent cursor --agent zed
+```
+
+Give each argument its own `--args`. Passing the whole command as one quoted
+string is the form add-mcp's own README shows, and it works only when the
+command is a bare name on `PATH`. With an absolute path — which is what
+`command -v` gives you — it does not split: it writes a `command` containing a
+space and an empty `args`, to every client you named, with no error. The
+resulting entry fails at startup, well after the point where you would connect
+it to the install step.
+
+`--global` writes each agent's user-level config; the default is the current
+project, which is the wrong scope here, since a session in any directory should
+be reachable.
+
+Every client gets the tools and the durable inbox. Channel push stays specific
+to Claude Code.
+
+Note that `npx add-mcp` fetches and runs a third-party package. If you would
+rather not, the entry it writes is the same three fields shown above, and every
+client's config file is documented.
 
 ### Enabling channel push in Claude Code
 
