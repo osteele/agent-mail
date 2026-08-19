@@ -880,3 +880,7 @@ text. All inbound mail is explicitly marked untrusted and cannot approve
 permissions or override the receiving session's rules. Use `hold` or `refuse`
 for sessions that should not accept agent-mail automatically, and do not expose
 the port.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
