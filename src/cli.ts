@@ -106,6 +106,7 @@ import {
   refreshSlackDashboard,
 } from "./slackDashboard.ts";
 import {
+  type AdmissionResult,
   appendMessageGuarded,
   knownProjects,
   markAllMessagesRead,
@@ -507,12 +508,29 @@ async function cmdNotify(
       signal: AbortSignal.timeout(3000),
     });
     if (resp.ok) {
-      const result = (await resp.json()) as { status?: string; id?: string };
-      console.log(
-        result.status === "duplicate"
-          ? `already sent as ${result.id}; this duplicate was not spooled again`
-          : `spooled ${result.id ?? "unknown"} via daemon`,
-      );
+      // The daemon's verdict carries a reason, and reading it as `{status, id}`
+      // discarded the one distinction that matters: a sender meeting its own
+      // retried attempt has succeeded, and was being told it sent a duplicate.
+      const outcome = classifyFallback((await resp.json()) as AdmissionResult);
+      switch (outcome.kind) {
+        case "rate_limited":
+          console.error(`rate limited; retry in ${outcome.retryAfterSeconds}s`);
+          process.exit(1);
+          break;
+        case "already-delivered":
+          console.log(
+            `spooled ${outcome.id} via daemon (an earlier attempt of this send reached the spool; its reply never arrived)`,
+          );
+          break;
+        case "duplicate":
+          console.log(
+            `already sent as ${outcome.id}; this duplicate was not spooled again`,
+          );
+          break;
+        case "spooled":
+          console.log(`spooled ${outcome.id} via daemon`);
+          break;
+      }
       return;
     }
     console.error(`daemon error: HTTP ${resp.status} ${await resp.text()}`);
@@ -547,7 +565,7 @@ async function cmdNotify(
         break;
       case "already-delivered":
         console.log(
-          `spooled ${outcome.id} via daemon (its reply never arrived)`,
+          `spooled ${outcome.id} via daemon (an earlier attempt of this send reached the spool; its reply never arrived)`,
         );
         break;
       case "duplicate":

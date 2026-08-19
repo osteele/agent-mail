@@ -752,3 +752,58 @@ test("notify reports delivery when the daemon stored the message but lost its re
     rmSync(root, { recursive: true, force: true });
   }
 }, 20000);
+
+test("a daemon duplicate is read by reason, not just by status", async () => {
+  // The regression: the daemon answers `{status, id, reason}` and this path read
+  // `{status, id}`. A sender meeting its own retried attempt — reason
+  // "attempt-key", which means the message IS in the spool — was told it had
+  // sent a duplicate. Only the fallback path, which almost never runs,
+  // distinguished them.
+  const cases = [
+    {
+      reason: "attempt-key",
+      expect: /spooled dup-1 via daemon \(an earlier attempt/,
+    },
+    { reason: "content-window", expect: /already sent as dup-1/ },
+  ];
+  const project = mkdtempSync(join(tmpdir(), "agent-mail-dup-"));
+  const cli = join(import.meta.dir, "cli.ts");
+  try {
+    for (const testCase of cases) {
+      const server = Bun.serve({
+        port: 0,
+        fetch: () =>
+          Response.json({
+            status: "duplicate",
+            id: "dup-1",
+            reason: testCase.reason,
+          }),
+      });
+      try {
+        const child = Bun.spawn(
+          [
+            process.execPath,
+            cli,
+            "notify",
+            "--project",
+            project,
+            "--message",
+            "a message sent once",
+          ],
+          {
+            env: { ...process.env, AGENT_MAIL_PORT: String(server.port) },
+            stdout: "pipe",
+            stderr: "pipe",
+          },
+        );
+        expect(await child.exited).toBe(0);
+        const out = await new Response(child.stdout).text();
+        expect(out).toMatch(testCase.expect);
+      } finally {
+        server.stop(true);
+      }
+    }
+  } finally {
+    rmSync(project, { recursive: true });
+  }
+});

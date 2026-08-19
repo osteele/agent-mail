@@ -49,6 +49,7 @@ import {
   recoverCoordination,
 } from "./coordination.ts";
 import {
+  type FallbackOutcome,
   classifyFallback,
   decideHeldSettlements,
   decideNewMessageDelivery,
@@ -88,6 +89,7 @@ import {
 } from "./sessions.ts";
 import {
   type AdmissionOptions,
+  type AdmissionResult,
   type DeliveryReceipt,
   type Message,
   appendMessage,
@@ -758,19 +760,37 @@ function describeAudience(target: string, toSession?: string): string {
   return `to ${others.length} live session${others.length === 1 ? "" : "s"} in ${displayName(target)}${suffix}`;
 }
 
+/** One wording for one verdict, whichever path produced it.
+ *
+ * "duplicate" means an identical message is already in the spool, so the send
+ * succeeded earlier — say that outright. Phrased as a suppression it reads as a
+ * failure, and senders were calling delivery_status after every one to find out
+ * which it was. "already-delivered" is not that: it is the sender meeting its
+ * own earlier attempt, which is a success with a lost receipt. */
+function describeOutcome(outcome: FallbackOutcome, audience: string): string {
+  switch (outcome.kind) {
+    case "rate_limited":
+      return `rate limited; retry in ${outcome.retryAfterSeconds}s`;
+    case "already-delivered":
+      return `spooled as ${outcome.id}, ${audience} (an earlier attempt of this send reached the spool; its reply never arrived)`;
+    case "duplicate":
+      return `already sent as ${outcome.id}, ${audience}; this duplicate was not spooled again`;
+    case "spooled":
+      return `spooled as ${outcome.id}, ${audience}`;
+  }
+}
+
 async function deliver(msg: Message, audience: string): Promise<string> {
   // Prefer the daemon; fall back to direct append. Keep the tool result about
   // durable delivery only: integration-side mirrors are not useful context for
   // the sending agent and tend to get repeated in its user-facing report.
   //
-  // "duplicate" means the identical message is already in the spool, so the
-  // send succeeded earlier — say that outright. Phrased as a suppression it
-  // reads as a failure, and senders were calling delivery_status after every
-  // one to find out which it was.
-  //
-  // The fallback runs whenever the daemon gave no usable answer, which is not
-  // the same as the daemon doing nothing: it may have appended and then failed
-  // to get the response back. `attemptKey` makes that case recognisable.
+  // Both paths classify the same admission verdict with the same function. They
+  // did not, and the difference was the whole bug: the daemon returns
+  // `{status, id, reason}`, this read `{status, id}`, and a sender meeting its
+  // own retried attempt — reason "attempt-key", a success — was reported as
+  // having sent a duplicate. The distinction existed on the fallback path only,
+  // which is the path that almost never runs.
   const attempt = withAttemptKey(msg);
   try {
     const resp = await fetch(`http://127.0.0.1:${config.port}/notify`, {
@@ -780,27 +800,18 @@ async function deliver(msg: Message, audience: string): Promise<string> {
       signal: AbortSignal.timeout(3000),
     });
     if (resp.ok) {
-      const result = (await resp.json()) as { status?: string; id?: string };
-      return result.status === "duplicate"
-        ? `already sent as ${result.id}, ${audience}; this duplicate was not spooled again`
-        : `spooled as ${result.id ?? "unknown"}, ${audience}`;
+      return describeOutcome(
+        classifyFallback((await resp.json()) as AdmissionResult),
+        audience,
+      );
     }
   } catch {
     // daemon down, slow, or the response was lost; fall through
   }
-  const outcome = classifyFallback(
-    appendMessageGuarded(attempt, admissionOptions),
+  return describeOutcome(
+    classifyFallback(appendMessageGuarded(attempt, admissionOptions)),
+    audience,
   );
-  switch (outcome.kind) {
-    case "rate_limited":
-      return `rate limited; retry in ${outcome.retryAfterSeconds}s`;
-    case "already-delivered":
-      return `spooled as ${outcome.id}, ${audience} (the daemon stored it; its reply never arrived)`;
-    case "duplicate":
-      return `already sent as ${outcome.id}, ${audience}; this duplicate was not spooled again`;
-    case "spooled":
-      return `spooled as ${outcome.id}, ${audience}`;
-  }
 }
 
 mcp.setRequestHandler(CallToolRequestSchema, async (req) => {
