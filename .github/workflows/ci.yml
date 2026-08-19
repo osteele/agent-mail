@@ -36,3 +36,61 @@ jobs:
 
       - name: Test
         run: bun test
+
+  # Installs the way the README tells a user to, and runs what they would run.
+  # The suite above cannot catch this class of fault: it exercises the sources
+  # under Bun, while an installed package is built JavaScript under Node, and
+  # the two disagreed silently. Shipping .ts made a package that installed
+  # cleanly and could not start, because Node refuses to strip types under
+  # node_modules.
+  install:
+    name: install from git (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # 22.18 is the declared floor, where type stripping first became the
+        # default; latest guards against the opposite drift.
+        node: ["22.18", "22", "24"]
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `prepare` builds from a clone, so the install needs real history.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      # git+file: exercises the same path as github:osteele/agent-mail — npm
+      # clones, installs devDependencies, and runs `prepare` to build dist/.
+      - name: Install from a git URL
+        run: |
+          mkdir -p "$RUNNER_TEMP/consumer" && cd "$RUNNER_TEMP/consumer"
+          npm init -y >/dev/null
+          npm install "git+file://$GITHUB_WORKSPACE#$GITHUB_SHA"
+
+      - name: The CLI runs
+        run: |
+          cd "$RUNNER_TEMP/consumer"
+          ./node_modules/.bin/agent-mail --help
+
+      - name: The MCP server completes an initialize handshake
+        run: |
+          cd "$RUNNER_TEMP/consumer"
+          request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}'
+          response=$(printf '%s\n' "$request" \
+            | timeout 30 node node_modules/agent-mail/dist/channel.js 2>/dev/null \
+            | head -1)
+          echo "$response"
+          echo "$response" | grep -q '"serverInfo"'
+
+      - name: The dashboard stays off unless asked for
+        run: |
+          cd "$RUNNER_TEMP/consumer"
+          if ./node_modules/.bin/agent-mail dashboard >/dev/null 2>&1; then
+            echo "dashboard served without being enabled" >&2
+            exit 1
+          fi
