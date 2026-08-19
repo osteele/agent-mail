@@ -77,12 +77,14 @@ jobs:
           cd "$RUNNER_TEMP/consumer"
           ./node_modules/.bin/agent-mail --help
 
+      # Through `agent-mail mcp`, which is what the README's add-mcp line
+      # configures a client to run — not the server file behind it.
       - name: The MCP server completes an initialize handshake
         run: |
           cd "$RUNNER_TEMP/consumer"
           request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"ci","version":"0"}}}'
           response=$(printf '%s\n' "$request" \
-            | timeout 30 node node_modules/agent-mail/dist/channel.js 2>/dev/null \
+            | timeout 30 ./node_modules/.bin/agent-mail mcp 2>/dev/null \
             | head -1)
           echo "$response"
           echo "$response" | grep -q '"serverInfo"'
