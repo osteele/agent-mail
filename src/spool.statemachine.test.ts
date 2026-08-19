@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,7 @@ import {
   settleHeldMessages,
 } from "./delivery.ts";
 import type { InboundPolicy } from "./registry.ts";
+import { slowTest } from "./slowTests.ts";
 import {
   type DeliveryReceipt,
   type Message,
@@ -404,7 +405,7 @@ const commandArb = fc.oneof(
 
 const seed: Parameters<typeof fc.assert>[1] = { seed: 42 };
 
-test("delivery state machine preserves receipt invariants", () => {
+slowTest("delivery state machine preserves receipt invariants", () => {
   fc.assert(
     fc.property(fc.commands([commandArb], { size: "+1" }), (cmds) => {
       const project = makeProject();
@@ -437,7 +438,7 @@ test("delivery state machine preserves receipt invariants", () => {
   );
 });
 
-test("expired messages are not delivered as pushed or held", () => {
+slowTest("expired messages are not delivered as pushed or held", () => {
   fc.assert(
     fc.property(
       fc.record({
@@ -630,7 +631,7 @@ const spoolCommandArb = fc.oneof(
   },
 );
 
-test("spool admission and read state preserve invariants", () => {
+slowTest("spool admission and read state preserve invariants", () => {
   fc.assert(
     fc.property(fc.commands([spoolCommandArb], { size: "+1" }), (cmds) => {
       const project = makeProject();

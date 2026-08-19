@@ -1,8 +1,9 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import fc from "fast-check";
+import { slowTest } from "./slowTests.ts";
 import { TransferStore } from "./transfers.ts";
 import {
   WorkConflictError,
@@ -573,22 +574,25 @@ const commandArb = fc.oneof(
 
 const seed: Parameters<typeof fc.assert>[1] = { seed: 42 };
 
-test("work lease + transfer state machine preserves ownership invariants", () => {
-  fc.assert(
-    fc.property(fc.commands([commandArb], { size: "+1" }), (cmds) => {
-      const { project, workStore, transferStore } = makeProject();
-      const initialModel: WorkModel = {
-        project,
-        owners: new Map(),
-        leases: new Map(),
-        resources: new Map(),
-        transfers: new Map(),
-      };
-      const initialReal: WorkReal = { project, workStore, transferStore };
-      const setup = () => ({ model: initialModel, real: initialReal });
-      fc.modelRun(setup, cmds);
-      assertInvariants(initialModel, initialReal);
-    }),
-    { ...seed, numRuns: 30 },
-  );
-}, 10000);
+slowTest(
+  "work lease + transfer state machine preserves ownership invariants",
+  () => {
+    fc.assert(
+      fc.property(fc.commands([commandArb], { size: "+1" }), (cmds) => {
+        const { project, workStore, transferStore } = makeProject();
+        const initialModel: WorkModel = {
+          project,
+          owners: new Map(),
+          leases: new Map(),
+          resources: new Map(),
+          transfers: new Map(),
+        };
+        const initialReal: WorkReal = { project, workStore, transferStore };
+        const setup = () => ({ model: initialModel, real: initialReal });
+        fc.modelRun(setup, cmds);
+        assertInvariants(initialModel, initialReal);
+      }),
+      { ...seed, numRuns: 30 },
+    );
+  },
+);

@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
@@ -11,6 +11,7 @@ import {
   canonicalPath,
   pathClaimTargets,
 } from "./claims.ts";
+import { slowTest } from "./slowTests.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -520,23 +521,26 @@ const commandArb = fc.oneof(
 
 const seed: Parameters<typeof fc.assert>[1] = { seed: 42 };
 
-test("claims state machine preserves path and experiment invariants", () => {
-  fc.assert(
-    fc.property(fc.commands([commandArb], { size: "+1" }), (cmds) => {
-      const { project, notebook, store } = makeProject();
-      const initialModel: ClaimModel = {
-        project,
-        notebook,
-        owners: new Map(),
-        pathClaims: new Map(),
-        experimentClaims: new Map(),
-        pathTypes: new Map(),
-      };
-      const initialReal: ClaimReal = { project, notebook, store };
-      const setup = () => ({ model: initialModel, real: initialReal });
-      fc.modelRun(setup, cmds);
-      assertInvariants(initialModel, initialReal);
-    }),
-    { ...seed, numRuns: 30 },
-  );
-}, 10000);
+slowTest(
+  "claims state machine preserves path and experiment invariants",
+  () => {
+    fc.assert(
+      fc.property(fc.commands([commandArb], { size: "+1" }), (cmds) => {
+        const { project, notebook, store } = makeProject();
+        const initialModel: ClaimModel = {
+          project,
+          notebook,
+          owners: new Map(),
+          pathClaims: new Map(),
+          experimentClaims: new Map(),
+          pathTypes: new Map(),
+        };
+        const initialReal: ClaimReal = { project, notebook, store };
+        const setup = () => ({ model: initialModel, real: initialReal });
+        fc.modelRun(setup, cmds);
+        assertInvariants(initialModel, initialReal);
+      }),
+      { ...seed, numRuns: 30 },
+    );
+  },
+);
