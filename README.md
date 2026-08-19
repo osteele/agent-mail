@@ -666,19 +666,26 @@ than one that is simply always there. It prints nothing only when the payload
 carries no session id.
 
 `--fields` prints one tab-separated line instead — `name`, peer count, unread
-messages, and this session's channel-push status — so a status line can show
-all four from a single invocation rather than reimplementing agent-mail's
-registry and spool semantics in shell:
+messages, and whether mail reaches this session on its own — so a status line
+can show all four from a single invocation rather than reimplementing
+agent-mail's registry and spool semantics in shell:
 
 ```
-Quiet Lantern\t2\t0\t
-Quiet Lantern\t2\t3\thost-not-loaded
+Quiet Lantern\t2\t0\tpush
+Quiet Lantern\t2\t3\tpull
+Quiet Lantern\t0\t0\tunknown
 ```
 
-The push status is empty when pushes are expected to land or the diagnosis was
-never recorded; `host-not-loaded` or `identity-unauthorized` mean this session's
-channel push goes nowhere and its mail arrives only when it pulls. A session is
-otherwise the last to find this out, since it emits nothing and hears no
+The fourth field is `push` when channel push is expected to land, `pull` when it
+is not, `unknown` when the session is registered but carries no diagnosis, and
+empty when no session is registered to ask about. There are two unrelated ways
+to be pulling: a host that is not Claude Code has no channel at all, so every
+Codex, kimi, and opencode session is pull-only by construction; and a Claude
+Code session can hold a channel it cannot use, because its host was launched
+without the flag or under an identity the host will not authorize. They differ
+in how you repair them — `agent-mail status` says which — but not in what a
+reader needs to do, which is to check mail rather than wait for it. A session
+cannot see any of this about itself: it emits successfully and hears no
 complaint.
 
 It reads Claude Code's [statusLine](https://code.claude.com/docs/en/statusline)

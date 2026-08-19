@@ -720,17 +720,43 @@ function unreadForSession(project: string, sessionId: string): number {
   ).length;
 }
 
-/** This session's own channel-push diagnosis, or "" when it is not registered
- * or the diagnosis was never recorded. The session is the last to learn its
- * pushes go nowhere — it advertises the capability and hears no complaint — so
- * this is the one place the news reaches the human in front of it. */
-function channelPushStatusFor(
+/** Whether mail reaches this session on its own: "push", "pull", or "" when
+ * there is nothing registered to ask.
+ *
+ * Two independent ways to end up pulling. A host that is not Claude Code has no
+ * channel at all, so every Codex, kimi, and opencode session is pull-only by
+ * construction. A Claude Code session can also have a channel it cannot use —
+ * host launched without the flag, or an identity the host will not authorize.
+ * Both land in the same place for the reader: mail arrives when you ask for it
+ * and not before. The distinction between them is a repair instruction, which
+ * belongs in `agent-mail status`, not in a status line.
+ *
+ * A session is otherwise the last to learn this about itself: it emits
+ * successfully and hears no complaint.
+ *
+ * "" means no registration to ask, which is not the same as not knowing: there
+ * is no session here to describe. "unknown" means there is one and its
+ * diagnosis is missing. */
+function pushDeliveryFor(
   sessions: Registration[],
   sessionId: string | undefined,
 ): string {
   if (!sessionId) return "";
-  const self = sessions.find((r) => r.sessionId === sessionId);
-  return self?.capabilities?.channelPushStatus ?? "";
+  const capabilities = sessions.find(
+    (r) => r.sessionId === sessionId,
+  )?.capabilities;
+  if (!capabilities) return "";
+  if (!capabilities.channelPush) return "pull";
+  const status = capabilities.channelPushStatus;
+  if (status === "authorized") return "push";
+  if (status === "host-not-loaded" || status === "identity-unauthorized") {
+    return "pull";
+  }
+  // No diagnosis, or one that could not be verified — a session registered
+  // before this was recorded, or a process scan that failed. Reporting push
+  // would be the silent-in-the-reassuring-direction failure this field exists
+  // to end; reporting pull would cry wolf at every session that predates it.
+  return "unknown";
 }
 
 async function cmdStatusLine(
@@ -766,7 +792,7 @@ async function cmdStatusLine(
           name,
           peers.length,
           sessionId ? unreadForSession(project, sessionId) : 0,
-          channelPushStatusFor(sessions, sessionId),
+          pushDeliveryFor(sessions, sessionId),
         ].join("\t"),
       );
       return;
