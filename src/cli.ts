@@ -1862,6 +1862,8 @@ Daemon (launchd-aware):
   logs [-f]                Show, or follow, the daemon log
 
 Setup:
+  mcp                   Run the MCP server on stdio. This is what an agent's
+                        config launches; you do not run it by hand.
   install [--native-audit] [--no-codex] [--replace-claude] [--replace-codex]
                         Install daemon and Claude/Codex MCP entries; optionally
                         audit native Claude SendMessage traffic
@@ -1951,6 +1953,16 @@ switch (cmd) {
     break;
   case "slack-dashboard":
     await cmdSlackDashboard(flags);
+    break;
+  case "mcp":
+    // Run the MCP server in this process. Importing it starts it; it owns
+    // stdio from here, so nothing below may read stdin or write stdout.
+    //
+    // This exists so one command can both register and be the server, which is
+    // what lets a client be configured in a single line without a prior global
+    // install. The daemon is a separate, optional step: sending falls back to
+    // appending to the spool directly when no daemon answers.
+    await import("./channel.ts");
     break;
   case "install":
     cmdInstall(flags);

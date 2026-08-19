@@ -90,8 +90,34 @@ Both sit in a wider set of agent infrastructure, listed at
 
 ## Quick start
 
-Requires Node 22.18 or later. Its automatic daemon installer currently uses
-macOS launchd.
+Register agent-mail with the agents you use, in one command:
+
+```bash
+npx add-mcp github:osteele/agent-mail --args mcp --name agent-mail --global \
+  --agent claude-code --agent codex
+```
+
+That is the whole install. Sessions can send mail, read their inbox, and take
+claims. Nothing is cloned and nothing runs in the background:
+[`add-mcp`](https://github.com/neon-solutions/add-mcp) writes each agent's
+config file, and `npx` fetches agent-mail when a session starts it.
+
+Name any other clients the same way — `--agent cursor --agent zed`, and so on;
+`npx add-mcp list-agents` lists the twenty or so it knows. Every client gets the
+same tools and the same durable inbox. Channel push, where mail arrives in a
+session's context without the agent asking, is specific to Claude Code and needs
+[three more steps](#enabling-channel-push-in-claude-code).
+
+`--global` writes each agent's user-level config rather than the current
+project, which is what you want: a session in any directory should be reachable.
+
+Requires Node 22.18 or later. Restart existing sessions afterward.
+
+### Adding the daemon
+
+Optional. It adds [Slack echo](#connecting-to-slack), the
+[status line](#claude-code-status-line), and pruning of dead sessions without
+waiting for someone to run a command:
 
 ```bash
 npm install -g github:osteele/agent-mail
@@ -99,56 +125,28 @@ agent-mail install
 agent-mail status
 ```
 
-`agent-mail install` starts the daemon and registers agent-mail as an MCP
-server for Claude Code and Codex.
+Mail is delivered with or without it: when no daemon answers, a session writes
+to the project's spool itself. The daemon is a background service, currently
+macOS launchd, not a message broker.
 
-Restart existing Claude Code and Codex sessions after installation.
+`agent-mail install` also registers Claude Code and Codex itself, so it is an
+alternative to the one-liner rather than a step after it. Running both is
+harmless — an entry that already points somewhere else is reported and left
+alone — but there is no reason to.
 
 **Platforms.** macOS and Linux are tested in CI. Windows is unsupported:
 session liveness is read from `ps`, and without it the registry cannot prune
 sessions or expire claims. See
 [docs/decisions/0005](docs/decisions/0005-no-windows-support.md).
 
-### Registering with other agents
-
-`agent-mail install` covers Claude Code and Codex, and it does more than write
-a config entry — it reconciles the plugin and user-scope registrations so Claude
-keeps exactly one. Prefer it for those two.
-
-For any other client, [`add-mcp`](https://github.com/neon-solutions/add-mcp)
-knows the config format and location for about twenty of them, including kimi,
-opencode, Cursor, Zed, Gemini CLI, and VS Code:
-
-```bash
-npx add-mcp "$(command -v node)" \
-  --args "$(npm root -g)/agent-mail/dist/channel.js" \
-  --name agent-mail --global --agent cursor --agent zed
-```
-
-Give each argument its own `--args`. Passing the whole command as one quoted
-string is the form add-mcp's own README shows, and it works only when the
-command is a bare name on `PATH`. With an absolute path — which is what
-`command -v` gives you — it does not split: it writes a `command` containing a
-space and an empty `args`, to every client you named, with no error. The
-resulting entry fails at startup, well after the point where you would connect
-it to the install step.
-
-`--global` writes each agent's user-level config; the default is the current
-project, which is the wrong scope here, since a session in any directory should
-be reachable.
-
-Every client gets the tools and the durable inbox. Channel push stays specific
-to Claude Code.
-
-Note that `npx add-mcp` fetches and runs a third-party package. If you would
-rather not, the entry it writes is the same three fields shown above, and every
-client's config file is documented.
-
 ### Enabling channel push in Claude Code
 
 The MCP tools and the durable inbox work as soon as the server is registered.
 Channel push — mail arriving in a session's context without the agent asking for
-it — is a separate opt-in with four parts, all of which must line up:
+it — is a separate opt-in with four parts, all of which must line up.
+
+It also needs a clone, unlike everything above: the marketplace is a directory
+in this repository, and `claude plugin marketplace add` takes a local path.
 
 1. **A marketplace and plugin in this repo.** `.claude-plugin/marketplace.json`
    declares the `osteele-local` marketplace; `plugins/agent-mail/` declares the
@@ -158,7 +156,8 @@ it — is a separate opt-in with four parts, all of which must line up:
    install` does not do for you:
 
    ```bash
-   claude plugin marketplace add /path/to/agent-mail
+   git clone https://github.com/osteele/agent-mail
+   claude plugin marketplace add ./agent-mail
    claude plugin install agent-mail@osteele-local
    ```
 
@@ -294,6 +293,7 @@ agent-mail slack-dashboard
 ## CLI
 
 ```bash
+agent-mail mcp                        # the MCP server on stdio; agents launch this
 agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to <id>] \
   [--session <name-or-id>] [--idempotency-key <key>] [--ttl <seconds>] [--no-slack]
                                       # --session addresses one session; see below
