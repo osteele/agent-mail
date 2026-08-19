@@ -1,42 +1,154 @@
 # agent-mail
 
+Durable local mail and advisory coordination between coding-agent sessions.
+
 You are running several coding agents at once, in different projects and
-different tools. One of them finishes something another is waiting on. Today
-you notice, and carry the message across yourself.
+different tools. One of them finishes something another is waiting on. You
+copy text from one session and paste it into another.
 
 agent-mail is a local message bus for those sessions. A message lands in a
-project's inbox on disk whether or not anyone is listening, and reaches a
-Claude Code session in context when one is.
+project's on-disk inbox (its spool) whether or not anyone is listening, and
+reaches a Claude Code session in context when one is.
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant QL as Quiet Lantern<br/>Claude, project augur
-    participant Spool as agent-mail spool
-    participant Slack as Slack agent-mail channel
-    participant SO as Silver Otter<br/>Codex, project augur
-
-    QL->>Spool: send_mail to Silver Otter<br/>"Can you verify the latency table?"
-    Spool-->>Slack: 12:14 augur: Quiet Lantern to Silver Otter
-    SO->>Spool: check_inbox
-    Note over SO,Spool: Codex has no channel push,<br/>so it reads when it asks
-    Spool-->>SO: "Can you verify the latency table?"
-    SO->>Spool: send_mail reply_to=msg-104<br/>"Row 21 still uses milliseconds."
-    Spool-->>Slack: 12:17 augur: Silver Otter to Quiet Lantern
-    Spool->>QL: channel push
-    Note over Spool,QL: Claude Code with the channel loaded,<br/>so the reply arrives unasked
+graph LR
+    QL["Quiet Lantern<br/>a Claude Code session"] -->|send_mail| IN[("the project's inbox")]
+    AUTO["CLI · weft · HTTP"] --> IN
+    IN -->|"push, or read on check_inbox"| SO["Silver Otter<br/>a Codex session"]
+    IN -.->|echo| SLACK["Slack"]
 ```
 
-Sessions address each other by name across project directories. Replies
-thread. Automation can send too: the CLI, an HTTP client, or a tool such as
-[weft](https://github.com/osteele/weft) reporting a finished job. Alongside the
-mail, agents can take advisory claims on files and on units of work, so two of
-them do not edit the same thing at once.
+Sessions address each other by stable names across project directories.
 
-## Choosing between this and Claude Code's built-ins
+- **Durable delivery.** A message waits in the project's inbox and is read
+  when a session next attaches. Receipts record what happened to it.
+- **Any endpoint.** Claude Code and Codex sessions get the same tools and
+  inboxes; the CLI, an HTTP client, or a tool such as
+  [weft](https://github.com/osteele/weft) reporting a finished job can send
+  too.
+- **Push into Claude Code.** With the channel enabled, mail arrives in a
+  session's context without the agent asking.
+- **Advisory coordination.** Path claims keep two agents from editing the
+  same files, work leases record who is responsible for a logical unit, and
+  lab-notebook experiment numbers (`EXP-NNN`) allocate atomically.
+- **Inspectable traffic.** Unread state, threads, Slack echo, and web and
+  Slack dashboards.
 
-Claude Code ships two things that overlap with agent-mail. If you are already
-using either, start here.
+Claude Code's own cross-session messaging and agent teams cover the
+all-Claude, all-live, spawned-together case without any of this;
+[agent-mail versus Claude Code built-in messaging](#agent-mail-versus-claude-code-built-in-messaging)
+maps the boundary.
+
+## Quick start
+
+Register agent-mail with the agents you use, in one command:
+
+```bash
+npx add-mcp github:osteele/agent-mail --args mcp --name agent-mail --global \
+  --agent claude-code --agent codex
+```
+
+Sessions can then send mail, read their inbox, and take claims. The command's
+only effect is the config entry:
+[`add-mcp`](https://github.com/neon-solutions/add-mcp) writes each agent's
+config file, and `npx` fetches agent-mail when a session starts it, so there
+is no repository to clone and no background process to run.
+
+Pass `mcp` through `--args`: add-mcp does not split a quoted command string
+and silently writes a broken entry.
+
+Name any other clients the same way (`--agent cursor --agent zed`, and so on);
+`npx add-mcp list-agents` lists the twenty or so it knows. Every client gets the
+same tools and the same durable inbox. Channel push is specific to Claude Code
+and needs [its own setup](#enabling-channel-push-in-claude-code).
+
+`--global` writes each agent's user-level config rather than the current
+project, so a session in any directory stays reachable.
+
+Requires Node 22.18 or later. Restart existing sessions afterward.
+
+### Adding the daemon
+
+An optional daemon adds [Slack echo](#connecting-to-slack), the
+presence snapshot that keeps the [status line](#claude-code-status-line) fast,
+and pruning of dead sessions without waiting for someone to run a command:
+
+```bash
+npm install -g github:osteele/agent-mail
+agent-mail install
+agent-mail status
+```
+
+Mail is delivered with or without it: when no daemon answers, a session writes
+to the project's spool itself. The daemon is a background service, currently
+macOS launchd, and nothing about delivery depends on it.
+
+`agent-mail install` also registers agent-mail with Claude Code and Codex, so
+it can replace the one-liner. Running both is harmless (an entry that
+already points somewhere else is reported and left alone), but there is no
+reason to.
+
+**Platforms.** macOS and Linux are tested in CI. Windows is unsupported:
+session liveness is read from `ps`, and without it the registry cannot prune
+sessions or expire claims. See
+[docs/decisions/0005](docs/decisions/0005-no-windows-support.md). Version
+0.1.0, built for its author's machine first.
+
+### Enabling channel push in Claude Code
+
+The MCP tools and the durable inbox work as soon as the server is registered.
+Channel push is a separate opt-in with three parts, all of which must line up.
+
+It also needs a clone, unlike everything above: the plugin marketplace is a
+directory in this repository, and `claude plugin marketplace add` takes a
+local path.
+
+1. **The marketplace added and the plugin installed**, which `agent-mail
+   install` does not do for you:
+
+   ```bash
+   git clone https://github.com/osteele/agent-mail
+   claude plugin marketplace add ./agent-mail
+   claude plugin install agent-mail@osteele-local
+   ```
+
+2. **Channels enabled and this plugin allowed**, in managed settings
+   (`/Library/Application Support/ClaudeCode/managed-settings.json`):
+
+   ```json
+   {
+     "channelsEnabled": true,
+     "allowedChannelPlugins": [
+       { "marketplace": "osteele-local", "plugin": "agent-mail" }
+     ]
+   }
+   ```
+
+3. **Each session launched with the channel loaded:**
+
+   ```bash
+   claude --channels=plugin:agent-mail@osteele-local
+   ```
+
+   This is a per-launch decision, so set it once for every session instead of
+   typing it each time. With a launcher wrapper, put it in global
+   `extra_args`; scoping it to some paths leaves whole directories silently
+   without push.
+
+Run `agent-mail status` to see what is actually in place, and `agent-mail
+listeners` to see which live sessions were launched with the channel: one whose
+host was not is tagged `{channel:host-not-loaded}`.
+
+Send a smoke-test message to the current project:
+
+```bash
+agent-mail notify --project "$PWD" --from cli --message "agent-mail is ready"
+agent-mail inbox --project "$PWD"
+```
+
+## agent-mail versus Claude Code built-in messaging
+
+Claude Code ships two things that overlap with agent-mail.
 
 **[Cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging)**
 (`ListAgents` and `SendMessage`, Claude Code 2.1.224) sends a message to a
@@ -49,191 +161,38 @@ message each other through per-agent mailboxes, with file locking on task
 claims. For parallel work you are launching now, under one lead, in one
 project, use it.
 
-Reach for agent-mail when the shape is different in one of these ways:
+Use agent-mail when the shape is different in one of these ways:
 
-- **The sessions already exist and nobody spawned them.** Agent teams have a
+- **You started the sessions yourself.** Agent teams have a
   lead and teammates for the lead's lifetime, one team per session. agent-mail
   addresses peers that started independently, in their own projects, with no
   hierarchy and nothing to promote or transfer.
 - **Not every endpoint is Claude Code.** Codex sessions use the same tools and
   the same inboxes. So do the CLI, weft, and any HTTP client.
-- **The recipient may not be running.** A message waits in the project's inbox
-  and is read when a session next attaches. A team's config is removed when its
+- **The recipient may not exist yet.** A message, whether addressed to one
+  session or broadcast to the whole project, waits in the project's inbox and
+  is read when a session next attaches. A team's config is removed when its
   session ends.
-- **The unit of coordination is a file or a plan, not a task-list item.** Path
+- **The unit of coordination is a file or a plan, not a task.** Path
   claims express edit exclusion, work leases express who is responsible for a
   logical unit, and the two are deliberately separate.
-- **You want the traffic to be inspectable**: unread state, threads, receipts,
-  Slack echo, and dashboards.
+- **The traffic is inspectable.** agent-mail keeps unread state,
+  threads, and receipts, echoes to Slack, and serves dashboards.
 
 The transports coexist, and a native `SendMessage` does not pass through
-agent-mail unless you install the audit hook. See
-[Claude Code's native cross-session messaging](#claude-codes-native-cross-session-messaging)
-for running both without double-delivering.
+agent-mail unless you install the audit hook.
 
 The first commit here is from June 2026, when passing a message between two
 Claude sessions meant a human copying it. Claude Code has since grown its own
 answers, and where they overlap they are the better ones: they need no daemon,
 no channel flag, and no second inbox to reason about. What kept this project
-going is the part the overlap does not reach, and the list above is that part
-rather than a pitch. If your sessions are all Claude Code, all spawned
-together, and all still running, you probably do not need this.
+going is the part the overlap does not reach: the list above. If your
+sessions are all Claude Code, all spawned together, and all still running,
+you probably do not need this.
 
-A sibling project, [agent-lore](https://github.com/osteele/agent-lore), covers
-the adjacent case rather than competing with this one: mail carries something
-one session needs to tell another now, while lore is where a session records
-what it worked out for whoever comes next. If you find yourself sending the
-same explanation to a third agent, that is the boundary.
+## Claude Code's native cross-session messaging
 
-Both sit in a wider set of agent infrastructure, listed at
-[osteele.com/software/agent-tools](https://osteele.com/software/agent-tools).
-
-## Quick start
-
-Register agent-mail with the agents you use, in one command:
-
-```bash
-npx add-mcp github:osteele/agent-mail --args mcp --name agent-mail --global \
-  --agent claude-code --agent codex
-```
-
-That is the whole install. Sessions can send mail, read their inbox, and take
-claims. Nothing is cloned and nothing runs in the background:
-[`add-mcp`](https://github.com/neon-solutions/add-mcp) writes each agent's
-config file, and `npx` fetches agent-mail when a session starts it.
-
-Name any other clients the same way — `--agent cursor --agent zed`, and so on;
-`npx add-mcp list-agents` lists the twenty or so it knows. Every client gets the
-same tools and the same durable inbox. Channel push, where mail arrives in a
-session's context without the agent asking, is specific to Claude Code and needs
-[three more steps](#enabling-channel-push-in-claude-code).
-
-`--global` writes each agent's user-level config rather than the current
-project, which is what you want: a session in any directory should be reachable.
-
-Requires Node 22.18 or later. Restart existing sessions afterward.
-
-### Adding the daemon
-
-Optional. It adds [Slack echo](#connecting-to-slack), the
-[status line](#claude-code-status-line), and pruning of dead sessions without
-waiting for someone to run a command:
-
-```bash
-npm install -g github:osteele/agent-mail
-agent-mail install
-agent-mail status
-```
-
-Mail is delivered with or without it: when no daemon answers, a session writes
-to the project's spool itself. The daemon is a background service, currently
-macOS launchd, not a message broker.
-
-`agent-mail install` also registers Claude Code and Codex itself, so it is an
-alternative to the one-liner rather than a step after it. Running both is
-harmless — an entry that already points somewhere else is reported and left
-alone — but there is no reason to.
-
-**Platforms.** macOS and Linux are tested in CI. Windows is unsupported:
-session liveness is read from `ps`, and without it the registry cannot prune
-sessions or expire claims. See
-[docs/decisions/0005](docs/decisions/0005-no-windows-support.md).
-
-### Enabling channel push in Claude Code
-
-The MCP tools and the durable inbox work as soon as the server is registered.
-Channel push — mail arriving in a session's context without the agent asking for
-it — is a separate opt-in with four parts, all of which must line up.
-
-It also needs a clone, unlike everything above: the marketplace is a directory
-in this repository, and `claude plugin marketplace add` takes a local path.
-
-1. **A marketplace and plugin in this repo.** `.claude-plugin/marketplace.json`
-   declares the `osteele-local` marketplace; `plugins/agent-mail/` declares the
-   `agent-mail` plugin, whose `channels` entry names the `agent-mail` MCP server
-   from its `.mcp.json`.
-2. **The marketplace added and the plugin installed**, which `agent-mail
-   install` does not do for you:
-
-   ```bash
-   git clone https://github.com/osteele/agent-mail
-   claude plugin marketplace add ./agent-mail
-   claude plugin install agent-mail@osteele-local
-   ```
-
-3. **Channels enabled and this plugin allowed**, in managed settings
-   (`/Library/Application Support/ClaudeCode/managed-settings.json`):
-
-   ```json
-   {
-     "channelsEnabled": true,
-     "allowedChannelPlugins": [
-       { "marketplace": "osteele-local", "plugin": "agent-mail" }
-     ]
-   }
-   ```
-
-4. **Each session launched with the channel loaded:**
-
-   ```bash
-   claude --channels=plugin:agent-mail@osteele-local
-   ```
-
-   This is a per-launch decision, so it is best set once for every session
-   rather than typed. With a launcher wrapper, put it in global
-   `extra_args`; scoping it to some paths is what previously left whole
-   directories silently push-less.
-
-Run `agent-mail status` to see what is actually in place, and `agent-mail
-listeners` to see which live sessions were launched with the channel: one whose
-host was not is tagged `{channel:host-not-loaded}`.
-
-Codex supports the tools and durable inbox but has no channel push at all.
-
-Send a smoke-test message to the current project:
-
-```bash
-agent-mail notify --project "$PWD" --from cli --message "agent-mail is ready"
-agent-mail inbox --project "$PWD"
-```
-
-## Client and delivery support
-
-Both Claude Code and Codex load the same MCP server and use the same tools and
-spools. The receiving client determines how soon a message enters its context:
-
-| Route | Delivery |
-|---|---|
-| Claude → Claude | Channel push when enabled; otherwise `check_inbox` |
-| Claude → Codex | `check_inbox` in the receiving Codex session |
-| Codex → Claude | Channel push when enabled; otherwise `check_inbox` |
-| Codex → Codex | `check_inbox` in the receiving Codex session |
-| CLI, weft, or HTTP → Claude | Channel push when enabled; otherwise the durable inbox |
-| CLI, weft, or HTTP → Codex | Durable inbox, read with `check_inbox` |
-
-Codex does not currently support channel push. Its MCP tools still register the
-session, send mail, inspect peers, read and mark inbox messages, and manage
-claims. Messages remain available in the project spool after delivery.
-
-### Claude Code's native cross-session messaging
-
-[Claude Code 2.1.224 added built-in cross-session
-messaging](https://code.claude.com/docs/en/cross-session-messaging) between
-running Claude Code sessions with `ListAgents` and `SendMessage`. Use it for a
-direct, immediate message to a named Claude session on the same machine. It
-requires no agent-mail daemon or channel configuration.
-
-agent-mail covers the cases outside that live Claude-only path:
-
-- either endpoint is Codex;
-- the sender is a CLI command, weft job, HTTP client, or other automation;
-- the destination is a project inbox or every session in a project;
-- the message must survive periods with no receiving session;
-- the workflow needs unread state, threads, Slack echo, dashboards, or an audit
-  trail; or
-- agents need atomic path or experiment-number claims.
-
-The two transports can run together. By default, a native `SendMessage` does
+By default, a native `SendMessage` does
 not pass through agent-mail, so it does not appear in the spool, Slack, or
 dashboards. Install the optional audit hook with `agent-mail install
 --native-audit` to record successful native `SendMessage` calls in the sender's
@@ -241,13 +200,30 @@ agent-mail log and Slack echo. Audit records are never delivered through an
 agent-mail inbox, which prevents the hook from creating a second delivery or a
 message loop. The hook observes all `SendMessage` calls, including subagent and
 agent-team messages, and records the destination exactly as Claude supplies it.
+It is added to `~/.claude/settings.json` (or `$CLAUDE_CONFIG_DIR/settings.json`)
+without replacing other hooks.
 
-Do not send the same message through both transports. A native message that is
-held for approval may still be delivered later. Claude Code's
-`crossSessionInbound` setting controls native messages. agent-mail's inbound
-policy controls agent-mail messages. The policies are independent.
+Do not send the same message through both transports: a native message that is
+held for approval looks undelivered but may still be delivered later, so a
+copy resent through agent-mail arrives twice. Claude Code's
+`crossSessionInbound` setting controls native messages, and agent-mail's
+inbound policy controls agent-mail messages.
 
-## Connecting to Slack
+## Features
+
+### Client and delivery support
+
+Claude Code, Codex, and any other MCP client load the same MCP server and use
+the same tools and spools, and every sender (a session, the CLI, weft, an HTTP
+client) is delivered the same way. The receiving client is what determines how soon a
+message enters its context: a Claude Code session with channel push enabled
+receives it unasked, and otherwise reads it on the next `check_inbox`; a Codex
+session always reads on `check_inbox`, because Codex has no channel push.
+Codex's MCP tools still register the session, send mail, inspect peers, read
+and mark inbox messages, and manage claims. Messages remain available in the
+project spool after delivery.
+
+### Connecting to Slack
 
 An incoming webhook can mirror messages into a Slack channel. Create a Slack
 app and enable [Incoming
@@ -290,109 +266,19 @@ Environment-variable equivalents are `AGENT_MAIL_SLACK_BOT_TOKEN` and
 agent-mail slack-dashboard
 ```
 
-## CLI
-
-```bash
-agent-mail mcp                        # the MCP server on stdio; agents launch this
-agent-mail notify --project <dir> --message <text> [--from <label>] [--reply-to <id>] \
-  [--session <name-or-id>] [--idempotency-key <key>] [--ttl <seconds>] [--no-slack]
-                                      # --session addresses one session; see below
-agent-mail inbox [--project <dir>] [--limit N] [--unread]
-agent-mail mark-read [--project <dir>] (--id <message-id> | --all)
-agent-mail receipts [--project <dir>] [--id <message-id>] [--limit N]
-agent-mail listeners [--project <dir>] [--json] [--no-sync]
-                                      # attached sessions + idle times
-agent-mail state [--project <dir>] [--no-sync] [--json]
-                                      # stable non-mutating aggregate state
-agent-mail status-line [--project <dir>] [--session <id>] [--debug]  # see below
-agent-mail mute|unmute (--session <name-or-id> | --project <dir>)  # pause/resume push
-agent-mail inbound --policy accept|hold|refuse \
-  (--session <name-or-id> | --project <dir>)
-agent-mail claim-experiment [--project <dir>] [--notebook <dir>] [--owner <label>]
-agent-mail claim-path --path <path> [--path <path> ...] [--directory] [--project <dir>] [--owner <label>]
-agent-mail claims [--project <dir>]
-agent-mail release-claim --id <claim-id> [--project <dir>]
-agent-mail work list [--project <dir> | --all] [--type <type>] [--owner <owner>]
-agent-mail work acquire --type <type> --key <key> [--label <label>] [--source <path>] [--owner <label>]
-agent-mail work update --id <work-id> [--state working|waiting] [--activity <text>]
-agent-mail work release --id <work-id> [--project <dir>]
-agent-mail coordination list [--project <dir> | --all] [--kind <kind>] [--json]
-agent-mail coordination recover --id <coordination-id>
-agent-mail coordination request-transfer --id <work-id> [--reason <text>] [--timeout <seconds>]
-agent-mail coordination respond-transfer --id <request-id> --decision accept|decline [--message <text>]
-agent-mail coordination transfers [--project <dir> | --all] [--json]
-agent-mail dashboard [--port N] [--open] [--no-tui]   # web dashboard
-agent-mail slack-dashboard [--watch <seconds>]        # editable Slack dashboard
-agent-mail start|stop|restart|status  # daemon (launchd-aware)
-agent-mail graceful                   # SIGHUP: reload config
-agent-mail logs [-f]
-agent-mail install [--native-audit] [--no-codex] [--replace-claude] [--replace-codex]
-agent-mail uninstall
-```
-
-## Dashboards
-
-The installed daemon continuously serves a read-only dashboard at its base URL
-(`http://127.0.0.1:8377/` by default). It shows live sessions, unified
-coordination health, sender→recipient traffic, hourly volume, and a flight log,
-polling every two seconds. `agent-mail status` prints the configured URL.
-
-`agent-mail dashboard` reports that persistent URL; pass `--open` to open it.
-When the daemon is down it automatically starts the previous direct-filesystem
-fallback on the daemon port plus one. An explicit `--port N` always starts the
-fallback. Its terminal controls remain `o` to open and `q` to quit; use
-`--no-tui` for a plain long-running server. Both forms read the filesystem
-source of truth. Recovery remains available through MCP and the CLI.
-
-`agent-mail slack-dashboard` posts the same summary as a single Slack message
-and edits it in place on each run (`--watch <seconds>` to refresh on a timer).
-This needs a Slack **bot token** (the incoming webhook used for per-message
-echoes can't edit messages). See [Connecting to Slack](#connecting-to-slack).
-
-## Claude Code status line
+### Claude Code status line
 
 `agent-mail status-line` prints this session's display name, whether or not
 anyone else is in the project. The name is the session's address: agents in
-other projects refer to it by that name, so it is identity rather than
-disambiguation, and a name that came and went as peers appeared would be worse
-than one that is simply always there. It prints nothing only when the payload
-carries no session id.
+other projects refer to it by that name. It prints nothing only when the
+payload carries no session id.
 
-`--fields` prints one tab-separated line instead, carrying the name, peer count,
-unread messages, whether mail reaches this session on its own, and unprocessed
-weft jobs this session submitted. A status line can then show all five from a
-single invocation, rather than reimplementing agent-mail's registry and spool
-semantics in shell:
-
-```
-Quiet Lantern\t2\t0\tpush\t3
-Quiet Lantern\t2\t3\tpull\t0
-Quiet Lantern\t0\t0\tunknown\t
-```
-
-Fields are only ever appended. A consuming script splits positionally, so
-inserting one would silently mislabel every field after it.
-
-The fourth field is `push` when channel push is expected to land, `pull` when it
-is not, `unknown` when the session is registered but carries no diagnosis, and
-empty when no session is registered to ask about. There are two unrelated ways
-to be pulling: a host that is not Claude Code has no channel at all, so every
-Codex, kimi, and opencode session is pull-only by construction; and a Claude
-Code session can hold a channel it cannot use, because its host was launched
-without the flag or under an identity the host will not authorize. They differ
-in how you repair them, and `agent-mail status` says which. They do not differ in
-what a reader needs to do, which is to check mail rather than wait for it. A session
-cannot see any of this about itself: it emits successfully and hears no
-complaint.
-
-The fifth field counts unprocessed weft jobs whose submitter session is this
-one. It is read from a snapshot the daemon refreshes every 60 seconds
-(`~/.claude/agent-mail/weft-jobs.json`), never by running weft on the read
-path: `weft list jobs` takes seconds, and Claude Code drops the whole status
-line when the script overruns its budget. The field is empty when no usable
-snapshot exists, which covers a stopped daemon, a snapshot older than three
-minutes, and a weft that never ran. Empty and `0` are different claims: `0`
-says weft was asked and this session has nothing pending.
+`--fields` prints one tab-separated line instead: the name, peer count, unread
+messages, `push`/`pull` for whether mail reaches this session on its own, and
+unprocessed weft jobs this session submitted. A status line can then show all
+five from a single invocation, rather than reimplementing agent-mail's
+registry and spool semantics in shell. Fields are only ever appended, so a
+consuming script can split positionally.
 
 It reads Claude Code's [statusLine](https://code.claude.com/docs/en/statusline)
 JSON payload on stdin, taking the session ID and project directory from it. Add
@@ -427,128 +313,22 @@ Then point `statusLine` at it in `~/.claude/settings.json`:
 { "statusLine": { "type": "command", "command": "bash ~/.claude/statusline.sh" } }
 ```
 
-### Status line behavior
-
-- **Guard on `command -v agent-mail`.** The script runs for every project on
-  the machine, including ones where agent-mail isn't installed.
-- **Redirect stderr.** Anything the command writes to stderr would otherwise
-  land in the prompt. `--debug` reports the resolved project, session ID, and
-  each peer's recency tag there.
-- **Give identity its own row.** A script can print several lines, each of
-  which Claude Code renders as its own status row. A single long line is
-  truncated from the right in a split pane, taking whatever is last with it, so
-  the name and any alarm belong on a short first row and expendable telemetry
-  on a second.
-- **Size the output with `$COLUMNS`.** Claude Code sets `COLUMNS` and `LINES`
-  before each run, and the value tracks the pane the session is actually in
-  (v2.1.153+). `tput cols` cannot work: the script's output is captured rather
-  than connected to the terminal. `LINES` is the terminal height, not a row
-  allowance. Every row taken is a row of transcript lost.
-- **The exit code is always 0.** This includes errors, so `$(...)` stays safe
-  under `set -e`. Empty output means "nothing to show."
-- Claude Code cancels a status line command when the next update arrives. A
-  canceled script drops the whole line, so the script must finish well within
-  the 300 ms debounce. `status-line` reads the daemon's presence snapshot (see
-  below), and `--fields` also scans the project spool for the unread count;
-  together they cost roughly 100 ms on an unloaded machine, most of it process
-  startup. With the daemon stopped, a project-scoped process scan replaces the
-  snapshot read. Measure on a quiet machine: under heavy load every part of this
-  slows by the same large factor, so a figure taken then describes the load
-  rather than the command.
-
-The daemon republishes the pid-verified live registry to
-`~/.claude/agent-mail/presence.json` every 10 seconds. This snapshot lets
-latency-sensitive readers skip the process scan. It is a presentation cache
-with a 30-second TTL, never a routing input.
-`send_mail`, `list_sessions`, and both dashboards keep reading the registry
-directly. That tick is also what prunes registrations whose process has exited.
-
-Automation should use
-`agent-mail listeners --project <dir> --no-sync --json`, not read the snapshot
-file directly. The command returns a versioned JSON object with `source`,
-`fresh`, `generatedAt`, and raw `sessions` (including `sessionId`, `cwd`,
-`client`, `capabilities`, `inboundPolicy`, `muted`, `lastSeen`,
-`lastInboxPoll`, and `started`).
-`--no-sync` never scans processes, prunes registry entries, or falls back to a
-different source. If the daemon snapshot is missing, malformed, or older than
-30 seconds, it returns `fresh: false` with an empty `sessions` array. This mode
-is suitable for conservative advisory routing; it is not proof of delivery or
-attention.
-
-For a normalized cross-surface view, use
-`agent-mail state --no-sync --json` (optionally `--project <dir>`) or
-`GET /api/v1/state?project=<dir>`. Schema version 1 includes normalized
-presence with process identity and freshness, coordination entries with owner
-status and conditions, transfer requests, recent canonical message IDs and read
-state, routes, counts, logs, and source provenance. Both interfaces are
-read-only: they do not scan processes, prune registrations, or mutate claims
-or leases. The CLI without `--no-sync` asks the daemon first and falls back to
-the same filesystem-snapshot reader. Consumers must inspect the `freshness`
-fields rather than treating an old snapshot as negative liveness evidence.
-
-Schema-v1 top-level fields are `schemaVersion`, `generatedAt`, `source`,
-`freshness`, `totals`, `presence`, `coordination`, `transfers`, `messages`,
-`routes`, `log`, `volume`, and the compatibility `work` projection. `messages`
-contains the newest 60 records in newest-first order; totals, routes, and volume
-are computed from the full spool history. Additive fields may appear within
-version 1; removing or changing the meaning of a field requires a new schema
-version and endpoint.
-
-For poll-only sessions, `lastSeen` means only that some agent-mail tool ran; it
-does not imply that the inbox was checked. `lastInboxPoll` is stamped only by
-`check_inbox`, including an empty check, so automation can distinguish recent
-polling from unrelated activity. It still predicts only that the session may
-poll again. For a message already sent, `agent-mail receipts --id <message-id>`
-distinguishes `pushed` (channel delivery or an inbox pull) from `read` (an
-explicit mark-read); neither status proves that the recipient completed the
-requested work.
+[docs/status-line.md](docs/status-line.md) specifies the `--fields` output and
+collects advice for the script itself: the timing budget, multi-row output,
+sizing with `$COLUMNS`, and what the push/pull and weft-jobs fields mean.
 
 ## Configuration
 
-`~/.config/agent-mail/config.toml`:
+`~/.config/agent-mail/config.toml` holds the port, the Slack echo and
+dashboard settings, session aliases, the inbound policy, and the rate,
+deduplication, and expiry limits.
+[docs/configuration.md](docs/configuration.md) is the reference.
 
-```toml
-port = 8377
-# slack_webhook = "https://hooks.slack.com/services/..."
-# slack_echo = "all"   # or "none"
-# slack_bot_token = "xoxb-..."   # for `slack-dashboard` (chat:write scope)
-# slack_channel = "C0123ABCD"    # channel the dashboard posts/updates in
-# session_aliases = "llm-performance-models=augur, dependency-routing=deproute"
-# inbound_policy = "accept"      # accept, hold, or refuse
-# duplicate_window_seconds = 10  # 0 disables body deduplication
-# message_rate_limit_per_minute = 60  # 0 disables rate limiting
-# default_message_ttl_seconds = 0     # 0 means no default expiry
-# held_message_limit = 100
-```
+## CLI
 
-`session_aliases` is a comma list of `basename=alias` pairs that shorten the
-project base in full names (e.g. `augur-quiet-lantern` instead of
-`llm-performance-models-quiet-lantern`) across `listeners`, `list_sessions`,
-and both dashboards. Display names such as `Quiet Lantern` omit the project
-base. Also settable via
-`AGENT_MAIL_SESSION_ALIASES`. Changes are picked up on daemon `graceful`
-(SIGHUP) and by each new CLI/dashboard invocation.
-
-The `notify --no-slack` flag suppresses the mirror for that message only. The
-message is still appended to the project inbox, and other messages continue to
-use the configured `slack_echo` policy. Per-message echoes use display names in
-compact routes. A project broadcast shows up to three currently attached
-display names and `+N`; this list is a live snapshot rather than a delivery
-boundary. Deliberate Claude `/rename` names are kept verbatim.
-
-## HTTP API (127.0.0.1 only)
-
-| Endpoint | Description |
-|---|---|
-| `GET /` | persistent read-only web dashboard |
-| `GET /api/v1/state?project=<path>` | schema-v1 non-mutating aggregate state; project is optional |
-| `GET /api/state` | compatibility alias for `/api/v1/state` |
-| `POST /notify` | `{project, message, from?, meta?, idempotencyKey?, ttlSeconds?, slackEcho?}` → guarded spool + optional Slack echo |
-| `POST /read` | `{project, ids}` or `{project, all:true}` → mark messages read |
-| `GET /health` | liveness + config summary |
-| `GET /registry` | live channel-server registrations |
-| `GET /inbox?project=<path>&limit=N&unread=1` | read a project's spool |
-| `GET /receipts?project=<path>&message=<id>` | read delivery state changes |
+[docs/cli.md](docs/cli.md) is the full reference: every subcommand, its flags,
+and when to use it. `agent-mail help` prints a compact version of the same
+listing.
 
 ## Security note
 
@@ -568,6 +348,9 @@ reads them.
 [docs/architecture.md](docs/architecture.md) covers the rest: addressing,
 presence, muting, delivery controls and receipts, threads, path claims, work
 leases, transfers, and recovery.
+[docs/http-api.md](docs/http-api.md) lists the daemon's HTTP endpoints, and
+[docs/automation.md](docs/automation.md) specifies the machine-readable state
+outputs.
 
 ## Client integration and updates
 
@@ -575,42 +358,13 @@ Installing the package puts the `agent-mail` command on `PATH`;
 `agent-mail install` is the separate step that creates the launchd service and
 registers agent-mail with Claude Code and Codex. It registers whichever copy
 you ran it from, and with whichever runtime ran it, so the same command works
-from an installed package and from a development checkout.
+from an installed package and from a development checkout. `agent-mail
+uninstall` removes only the audit hook and MCP registrations that belong to
+this installation.
 
-The installer uses `codex mcp add` when no Codex entry exists. It preserves an
-entry that already matches this installation. If either client already uses the
-name for a different one, the installer leaves it unchanged. Inspect the
-Codex entry with `codex mcp get agent-mail --json`. Use `--replace-codex` or
-`--replace-claude` to replace an entry deliberately. Use `--no-codex` to skip
-Codex registration.
-
-When the `agent-mail` plugin is enabled in `~/.claude/settings.json`, the
-installer does not write a user-scope `mcpServers` entry, and removes one that
-belongs to this installation. Both register the same server name, so Claude keeps
-only one — the user-scope entry. That instance pushes under the channel identity
-`server:agent-mail` rather than `plugin:agent-mail@<marketplace>`, which the
-host has not authorized, so every push is discarded without an error while tools
-and the CLI keep working. If the entry points somewhere else, the
-installer reports it and leaves it in place; remove it with `claude mcp remove
-agent-mail`. Restart Claude sessions afterward.
-
-Each session's MCP server log records this at startup when push cannot land,
-naming the identity it would push under and the channels the host authorized.
-
-Claude Code's channel flag bypasses the research-preview allowlist for the
-named local server. It enables channel push without changing the MCP tools.
-
-To include successful native Claude `SendMessage` calls in dashboards and
-Slack without redelivering them, enable the optional audit hook:
-
-```bash
-agent-mail install --native-audit
-```
-
-The hook is added to `~/.claude/settings.json` (or
-`$CLAUDE_CONFIG_DIR/settings.json`) without replacing other hooks. `agent-mail
-uninstall` removes only the hook and MCP registrations that belong to this
-installation.
+[docs/install.md](docs/install.md) covers the installer's edge cases: when an
+existing entry is preserved, replaced, or left alone, and the plugin versus
+user-scope registration conflict that silently discards channel pushes.
 
 Restart every existing Claude Code and Codex session after an integration
 change or an agent-mail code update. Each session owns a long-running MCP
@@ -622,8 +376,7 @@ agent-mail restart
 ```
 
 Daemon configuration changes do not require a process restart. Reload them
-with `agent-mail graceful`. Codex provides tools and presence registration,
-but not push delivery.
+with `agent-mail graceful`.
 
 ## Development
 
@@ -648,18 +401,28 @@ bun test
 bun run build    # emit dist/, as the published package ships
 ```
 
-The code runs under both Bun and Node. Everything that differs between them —
-subprocesses, the HTTP server, synchronous sleeps, reading a slice of a file —
+The code runs under both Bun and Node. Everything that differs between them
+(subprocesses, the HTTP server, synchronous sleeps, reading a slice of a file)
 goes through `src/runtime.ts`, which dispatches on the host; no other module
 tests which runtime it is on. Under Bun each function delegates to the Bun API
 it replaced, so the runtime used in development stays the fast path.
 
-The published package ships JavaScript rather than the TypeScript sources.
-That is not a preference: Node refuses to strip types for files under
-`node_modules`, so a package shipping `.ts` installs but cannot run. `bun run
+The published package ships JavaScript rather than the TypeScript sources
+because Node refuses to strip types for files under `node_modules`, so a
+package shipping `.ts` installs but cannot run. `bun run
 build` is what `npm` runs through `prepare` on a GitHub install.
 
 The test suite uses `bun:test` and is not part of the published package.
+
+## Related projects
+
+[agent-lore](https://github.com/osteele/agent-lore) is a related project:
+mail carries something one session needs to tell another now, while lore is
+where a session records what it worked out for whoever comes next. If you find yourself sending the same explanation to a third
+agent, that is the boundary.
+
+Both sit in a wider set of agent infrastructure, listed at
+[osteele.com/software/agent-tools](https://osteele.com/software/agent-tools).
 
 ## License
 

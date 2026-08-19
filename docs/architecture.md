@@ -361,3 +361,27 @@ agent-mail coordination request-transfer --id <work-id> [--reason <text>] [--tim
 agent-mail coordination respond-transfer --id <request-id> --decision accept|decline [--message <text>]
 agent-mail coordination transfers [--project <dir> | --all] [--json]
 ```
+
+## A delivery, end to end
+
+Quiet Lantern (Claude Code) and Silver Otter (Codex) share a project. The
+spool mediates, Slack echoes, and each client reads by its own route:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant QL as Quiet Lantern<br/>Claude, project augur
+    participant Spool as agent-mail spool
+    participant Slack as Slack agent-mail channel
+    participant SO as Silver Otter<br/>Codex, project augur
+
+    QL->>Spool: send_mail to Silver Otter<br/>"Can you verify the latency table?"
+    Spool-->>Slack: 12:14 augur: Quiet Lantern to Silver Otter
+    SO->>Spool: check_inbox
+    Note over SO,Spool: Codex has no channel push,<br/>so it reads when it asks
+    Spool-->>SO: "Can you verify the latency table?"
+    SO->>Spool: send_mail reply_to=msg-104<br/>"Row 21 still uses milliseconds."
+    Spool-->>Slack: 12:17 augur: Silver Otter to Quiet Lantern
+    Spool->>QL: channel push
+    Note over Spool,QL: Claude Code with the channel loaded,<br/>so the reply arrives unasked
+```
