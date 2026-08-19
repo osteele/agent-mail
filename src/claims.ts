@@ -107,10 +107,10 @@ export function compareClaims(a: Claim, b: Claim): number {
 }
 
 export class ClaimConflictError extends Error {
-  constructor(
-    public readonly claim: Claim,
-    public readonly conflictingPath?: string,
-  ) {
+  readonly claim: Claim;
+  readonly conflictingPath?: string;
+
+  constructor(claim: Claim, conflictingPath?: string) {
     const resource =
       claim.type === "path"
         ? (conflictingPath ??
@@ -120,6 +120,8 @@ export class ClaimConflictError extends Error {
         : `${claim.experimentId} in ${claim.notebook}`;
     super(`${resource} is claimed by ${claim.owner.label} (${claim.id})`);
     this.name = "ClaimConflictError";
+    this.claim = claim;
+    this.conflictingPath = conflictingPath;
   }
 }
 
@@ -183,7 +185,11 @@ function pathsConflict(
 }
 
 export class ClaimStore {
-  constructor(private readonly root = CLAIMS_DIR) {}
+  private readonly root: string;
+
+  constructor(root = CLAIMS_DIR) {
+    this.root = root;
+  }
 
   private projectDir(project: string): string {
     return join(this.root, projectSlug(project));

@@ -21,6 +21,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { sleepSync } from "./runtime.ts";
 
 export interface LockOwner {
   label: string;
@@ -90,7 +91,7 @@ export function withFileLock<T>(
         throw new Error(`timed out waiting for lock: ${lockPath}`);
       }
 
-      Bun.sleepSync(10);
+      sleepSync(10);
     }
   }
 

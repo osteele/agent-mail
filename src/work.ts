@@ -47,11 +47,14 @@ export interface WorkLease {
 }
 
 export class WorkConflictError extends Error {
-  constructor(public readonly lease: WorkLease) {
+  readonly lease: WorkLease;
+
+  constructor(lease: WorkLease) {
     super(
       `${lease.resource.type}:${lease.resource.key} is being worked by ${lease.owner.label} (${lease.id})`,
     );
     this.name = "WorkConflictError";
+    this.lease = lease;
   }
 }
 
@@ -135,7 +138,11 @@ function ownerMatches(
 }
 
 export class WorkStore {
-  constructor(private readonly root = WORK_DIR) {}
+  private readonly root: string;
+
+  constructor(root = WORK_DIR) {
+    this.root = root;
+  }
 
   private projectDir(project: string): string {
     return join(this.root, projectSlug(project));

@@ -113,10 +113,13 @@ function validateText(
 }
 
 export class TransferStore {
-  constructor(
-    private readonly root = TRANSFERS_DIR,
-    private readonly workStore = work,
-  ) {}
+  private readonly root: string;
+  private readonly workStore: typeof work;
+
+  constructor(root = TRANSFERS_DIR, workStore = work) {
+    this.root = root;
+    this.workStore = workStore;
+  }
 
   private path(id: string): string {
     return join(this.root, `${id}.json`);

@@ -1,9 +1,10 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /** Optional Claude Code PostToolUse hook that records native SendMessage calls.
  * Audit entries feed dashboards and Slack, but never enter a recipient inbox. */
 
 import { loadConfig } from "./config.ts";
 import { canonicalProject } from "./paths.ts";
+import { isEntryPoint, readStdinText } from "./runtime.ts";
 import {
   type AdmissionOptions,
   type Message,
@@ -119,9 +120,9 @@ async function recordAudit(input: unknown): Promise<void> {
   appendMessageGuarded(message, admissionOptions());
 }
 
-if (import.meta.main) {
+if (isEntryPoint(import.meta.url)) {
   try {
-    await recordAudit(JSON.parse(await Bun.stdin.text()) as unknown);
+    await recordAudit(JSON.parse(await readStdinText()) as unknown);
   } catch (error) {
     // Auditing must never change whether the native SendMessage succeeds.
     if (!(error instanceof SyntaxError || error instanceof Error)) throw error;

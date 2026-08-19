@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /** agent-mail channel server: spawned by the host (Claude Code or Codex) per
  * session over stdio as an MCP server.
  *
@@ -79,6 +79,7 @@ import {
   touchInboxPoll,
   unregister,
 } from "./registry.ts";
+import { readFileSlice } from "./runtime.ts";
 import {
   activityTag,
   claudeSessions,
@@ -1551,8 +1552,7 @@ async function poll(): Promise<void> {
   const size = statSync(mySpool).size;
   if (size < offset) offset = 0; // spool was truncated/rotated
   if (size === offset) return;
-  const file = Bun.file(mySpool);
-  const chunk = await file.slice(offset, size).text();
+  const chunk = await readFileSlice(mySpool, offset, size);
   for (const line of chunk.split("\n").filter(Boolean)) {
     let msg: Message & { id?: string };
     try {

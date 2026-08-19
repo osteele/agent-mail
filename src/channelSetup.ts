@@ -12,6 +12,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { spawnSyncCapture } from "./runtime.ts";
 
 export const MANAGED_SETTINGS_PATH =
   "/Library/Application Support/ClaudeCode/managed-settings.json";
@@ -108,16 +109,15 @@ export function channelsEnabledIn(settings: unknown): boolean | undefined {
 export function inspectChannelSetup(serverPath: string): ChannelSetupFacts {
   let plugin: InstalledChannelPlugin | null | undefined;
   try {
-    const listed = Bun.spawnSync(["claude", "plugin", "list", "--json"], {
-      stdout: "pipe",
-      stderr: "ignore",
-    });
+    const listed = spawnSyncCapture(["claude", "plugin", "list", "--json"]);
     if (listed.exitCode === 0) {
-      plugin = findChannelPlugin(listed.stdout.toString(), serverPath);
+      plugin = findChannelPlugin(listed.stdout, serverPath);
     }
+    // A non-zero exit covers both "ran and failed" and "`claude` is not on
+    // PATH": either way the plugin state cannot be observed, which is unknown
+    // rather than absent, and `plugin` is left undefined to say so.
   } catch {
-    // Bun.spawnSync throws when `claude` is not on PATH. No CLI means the
-    // plugin state cannot be observed at all: unknown, not absent.
+    // findChannelPlugin throws on malformed output; same verdict.
   }
 
   let settings: unknown;

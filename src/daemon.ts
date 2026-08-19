@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /** agent-mail daemon: localhost HTTP ingress + Slack echo.
  *
  * Endpoints (127.0.0.1 only):
@@ -22,6 +22,7 @@ import { LOG_PATH, PID_PATH, canonicalProject, ensureDirs } from "./paths.ts";
 import { writePresenceSnapshot } from "./presence.ts";
 import { writeProcessSnapshot } from "./processSnapshot.ts";
 import { listLive } from "./registry.ts";
+import { serve, spawnCapture, which } from "./runtime.ts";
 import { claudeSessions, resetSessionAliasCache } from "./sessions.ts";
 import { formatSlackEcho } from "./slackEcho.ts";
 import {
@@ -101,13 +102,16 @@ function json(data: unknown, status = 200): Response {
 ensureDirs();
 writeFileSync(PID_PATH, String(process.pid));
 
-const server = Bun.serve({
+const server = await serve({
   port: config.port,
   hostname: "127.0.0.1",
   async fetch(req) {
     const url = new URL(req.url);
 
-    if (req.method === "GET") {
+    // Gated on config, not on the route table: when the dashboard is off the
+    // daemon serves only its JSON API, and a dashboard URL is a 404 like any
+    // other unknown path rather than a 403 that advertises the feature.
+    if (req.method === "GET" && config.dashboard) {
       const dashboard = dashboardResponse(req);
       if (dashboard) return dashboard;
     }
@@ -285,7 +289,7 @@ let missingWeftLogged = false;
 function resolveWeft(): string | undefined {
   const configured = process.env.AGENT_MAIL_WEFT_BIN;
   if (configured) return existsSync(configured) ? configured : undefined;
-  const found = Bun.which("weft");
+  const found = which("weft");
   if (found) return found;
   for (const candidate of [
     join(homedir(), "go", "bin", "weft"),
@@ -309,24 +313,18 @@ function tickWeftJobs(): void {
     return;
   }
   refreshing = true;
-  // Bun.spawn throws synchronously when the executable is missing, so it must
-  // be inside the try: a rejected promise is caught below, a throw here would
-  // take the daemon down. It did once, under launchd, whose PATH omits weft.
-  let proc: Bun.Subprocess<"ignore", "pipe", "ignore">;
-  try {
-    proc = Bun.spawn(
-      [weft, "list", "jobs", "--unprocessed", "--format", "json"],
-      {
-        stdout: "pipe",
-        stderr: "ignore",
-      },
-    );
-  } catch (error) {
-    refreshing = false;
-    log(`weft jobs snapshot failed to start: ${error}`);
-    return;
-  }
-  Bun.readableStreamToText(proc.stdout)
+  // A missing executable is reported through the returned promises, never as
+  // a synchronous throw — the asymmetry that once took the daemon down under
+  // launchd, whose PATH omits weft, is absorbed in runtime.ts.
+  const proc = spawnCapture([
+    weft,
+    "list",
+    "jobs",
+    "--unprocessed",
+    "--format",
+    "json",
+  ]);
+  proc.stdout
     .then(async (out) => {
       const code = await proc.exited;
       if (code !== 0) throw new Error(`weft exited ${code}`);

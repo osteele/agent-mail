@@ -4,6 +4,7 @@
 
 import { spawn } from "node:child_process";
 import { buildReadOnlyState } from "./dashboardData.ts";
+import { type HttpServer, serve } from "./runtime.ts";
 
 /** Open a URL in the user's default browser (best-effort, detached). */
 export function openBrowser(url: string): void {
@@ -199,9 +200,9 @@ export function dashboardResponse(request: Request): Response | undefined {
 }
 
 /** Start the standalone dashboard on 127.0.0.1. Pass port 0 for an ephemeral
- * port; the chosen port is available as `server.port`. */
-export function serveDashboard(port: number): ReturnType<typeof Bun.serve> {
-  return Bun.serve({
+ * port; the chosen port is available as `server.port` once awaited. */
+export function serveDashboard(port: number): Promise<HttpServer> {
+  return serve({
     port,
     hostname: "127.0.0.1",
     fetch(req) {

@@ -28,6 +28,11 @@ export interface Config {
   defaultMessageTtlSeconds: number | null;
   /** Maximum held messages for one session before the oldest is refused. */
   heldMessageLimit: number;
+  /** Whether the HTTP dashboard is served at all. Off by default: it renders
+   * every project's sessions and message subjects, and the daemon's port is
+   * reachable by any local process, so it is opened deliberately rather than
+   * inherited by anyone who installs agent-mail. */
+  dashboard: boolean;
 }
 
 /** Parse a flat TOML subset: `key = "string"` / `key = 123` lines, # comments. */
@@ -104,6 +109,10 @@ export function loadConfig(): Config {
     process.env.AGENT_MAIL_HELD_MESSAGE_LIMIT ?? raw.held_message_limit,
     100,
   );
+  // Opt-in, and only to an explicit affirmative. Anything else — including a
+  // misspelling — leaves it off, because the failure that matters is a
+  // dashboard served by someone who did not mean to serve one.
+  const dashboard = isTrue(process.env.AGENT_MAIL_DASHBOARD ?? raw.dashboard);
   return {
     port,
     slackWebhook,
@@ -115,7 +124,15 @@ export function loadConfig(): Config {
     messageRateLimitPerMinute,
     defaultMessageTtlSeconds,
     heldMessageLimit,
+    dashboard,
   };
+}
+
+/** Affirmative config values, for flags that default to off. */
+function isTrue(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "true" || normalized === "1" || normalized === "yes";
 }
 
 function positiveNumber(value: string | undefined, fallback: number): number {

@@ -22,6 +22,7 @@ import {
   ensureDirs,
   projectSlug,
 } from "./paths.ts";
+import { sleepSync } from "./runtime.ts";
 import { assignedGeneratedSessionName } from "./sessions.ts";
 
 export interface Registration {
@@ -245,7 +246,7 @@ function withEntryLock<T>(path: string, fn: () => T): T {
       if (Date.now() >= deadline) {
         throw new Error(`timed out waiting for registry lock ${path}`);
       }
-      Bun.sleepSync(10);
+      sleepSync(10);
     }
   }
   try {
