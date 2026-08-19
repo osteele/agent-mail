@@ -15,6 +15,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { REGISTRY_DIR, projectSlug } from "./paths.ts";
 import {
+  type SessionCapabilities,
+  capabilityLabels,
   listLiveInProject,
   parsePsLine,
   register,
@@ -281,4 +283,66 @@ test("listLiveInProject collapses legacy and canonical spellings of one dir", ()
     for (const path of written) if (existsSync(path)) rmSync(path);
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// --- capability labels -------------------------------------------------------
+
+const CLAUDE_CAPABILITIES: SessionCapabilities = {
+  tools: true,
+  inboxPoll: true,
+  channelPush: true,
+  claims: true,
+  workLeases: true,
+  receipts: true,
+  nativePeerMessaging: true,
+};
+
+test("a session whose pushes land advertises a plain channel capability", () => {
+  expect(
+    capabilityLabels({
+      ...CLAUDE_CAPABILITIES,
+      channelPushStatus: "authorized",
+    }),
+  ).toEqual(["channel", "native-peer", "claims", "work", "receipts"]);
+});
+
+test("a degraded channel is named in the capability list", () => {
+  // The regression this exists for: the label had one reader and no writer, so
+  // a session whose host loaded no channel advertised a healthy `channel` on
+  // every surface while its pushes went nowhere.
+  expect(
+    capabilityLabels({
+      ...CLAUDE_CAPABILITIES,
+      channelPushStatus: "host-not-loaded",
+    })[0],
+  ).toBe("channel:host-not-loaded");
+  expect(
+    capabilityLabels({
+      ...CLAUDE_CAPABILITIES,
+      channelPushStatus: "identity-unauthorized",
+    })[0],
+  ).toBe("channel:identity-unauthorized");
+});
+
+test("an unverifiable diagnosis is not reported as a failure", () => {
+  // Absence of evidence: process inspection was unavailable, which says nothing
+  // about whether the host loaded the channel.
+  expect(
+    capabilityLabels({
+      ...CLAUDE_CAPABILITIES,
+      channelPushStatus: "unknown",
+    })[0],
+  ).toBe("channel");
+  expect(capabilityLabels(CLAUDE_CAPABILITIES)[0]).toBe("channel");
+});
+
+test("a host without channel push is polling, whatever the diagnosis says", () => {
+  expect(
+    capabilityLabels({
+      ...CLAUDE_CAPABILITIES,
+      channelPush: false,
+      nativePeerMessaging: false,
+      channelPushStatus: "host-not-loaded",
+    }),
+  ).toEqual(["poll", "claims", "work", "receipts"]);
 });

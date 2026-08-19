@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
+import type { ChannelPushStatus } from "./channelIdentity.ts";
 import {
   REGISTRY_DIR,
   canonicalProject,
@@ -56,14 +57,41 @@ export interface SessionCapabilities {
   workLeases: boolean;
   receipts: boolean;
   nativePeerMessaging: boolean;
-  /** Whether the host process was launched with an agent-mail channel flag.
+  /** Whether this session's pushes can reach the host, from
+   * `diagnoseChannelPush` at startup.
    *
-   * `channelPush` says this server will emit a notification; this says anything
-   * is listening for it. They diverged silently for days: mail spooled, a
+   * `channelPush` says this server will emit a notification; this says whether
+   * anything can receive it. They diverged silently for days: mail spooled, a
    * `pushed` receipt was written, and nothing reached the session, because the
-   * host had loaded no agent-mail channel. Undefined when process inspection is
-   * unavailable — never treat that as false. */
-  hostChannelLoaded?: boolean;
+   * host had loaded no agent-mail channel. `"unknown"` means process inspection
+   * was unavailable — never read it as a failure. */
+  channelPushStatus?: ChannelPushStatus;
+}
+
+/** Capability labels for one session, shared by every surface that renders
+ * them. The predecessor of this function was copied into four renderers; only
+ * one of them ever grew the degraded-channel branch, and it read a field
+ * nothing wrote — so a session whose pushes went nowhere advertised a healthy
+ * `{channel}` everywhere. One writer, one reader, no drift. */
+export function capabilityLabels(capabilities: SessionCapabilities): string[] {
+  return [
+    capabilities.channelPush
+      ? channelLabel(capabilities.channelPushStatus)
+      : "poll",
+    capabilities.nativePeerMessaging ? "native-peer" : undefined,
+    capabilities.claims ? "claims" : undefined,
+    capabilities.workLeases ? "work" : undefined,
+    capabilities.receipts ? "receipts" : undefined,
+  ].filter((label): label is string => label !== undefined);
+}
+
+/** `channel` when pushes are expected to land, `channel:<reason>` when they are
+ * not. An unverifiable diagnosis renders as plain `channel`: it is the absence
+ * of evidence, not evidence of breakage. */
+function channelLabel(status?: ChannelPushStatus): string {
+  return status === undefined || status === "authorized" || status === "unknown"
+    ? "channel"
+    : `channel:${status}`;
 }
 
 export interface ProcessInfo {

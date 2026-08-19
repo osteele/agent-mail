@@ -185,7 +185,8 @@ export function describeChannelSetup(
     facts.plugin
       ? `    claude --channels=plugin:${facts.plugin.id}`
       : "    claude --channels=plugin:<plugin>@<marketplace>",
-    "  `agent-mail listeners` tags a session whose host was not.",
+    "  `agent-mail listeners` tags one that was not {channel:host-not-loaded},",
+    "  from its next launch on.",
   );
   return lines;
 }

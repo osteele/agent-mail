@@ -65,6 +65,7 @@ import {
 import {
   type InboundPolicy,
   type SessionCapabilities,
+  capabilityLabels,
   inboundPolicy,
   isMuted,
   listLive,
@@ -175,6 +176,9 @@ function sessionCapabilities(client = hostClient): SessionCapabilities {
     tools: true,
     inboxPoll: true,
     channelPush: claude,
+    // Only meaningful where channel push exists at all; a Codex host carries no
+    // channels flag and would otherwise register as permanently degraded.
+    ...(claude ? { channelPushStatus: channelPush.status } : {}),
     claims: true,
     workLeases: true,
     receipts: true,
@@ -185,13 +189,7 @@ function sessionCapabilities(client = hostClient): SessionCapabilities {
 
 function capabilityTag(capabilities?: SessionCapabilities): string {
   if (!capabilities) return "";
-  const labels = [
-    capabilities.channelPush ? "channel" : "poll",
-    capabilities.nativePeerMessaging ? "native-peer" : undefined,
-    capabilities.claims ? "claims" : undefined,
-    capabilities.workLeases ? "work" : undefined,
-    capabilities.receipts ? "receipts" : undefined,
-  ].filter(Boolean);
+  const labels = capabilityLabels(capabilities);
   return labels.length ? ` {${labels.join(",")}}` : "";
 }
 

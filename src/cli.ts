@@ -87,6 +87,7 @@ import {
 import {
   type InboundPolicy,
   type Registration,
+  capabilityLabels,
   listLive,
   setInboundPolicy,
   setMuted,
@@ -122,17 +123,7 @@ import { WorkConflictError } from "./work.ts";
 function capabilityTag(r: Registration): string {
   const capabilities = r.capabilities;
   if (!capabilities) return "";
-  const labels = [
-    capabilities.channelPush
-      ? capabilities.hostChannelLoaded === false
-        ? "channel:host-not-loaded"
-        : "channel"
-      : "poll",
-    capabilities.nativePeerMessaging ? "native-peer" : undefined,
-    capabilities.claims ? "claims" : undefined,
-    capabilities.workLeases ? "work" : undefined,
-    capabilities.receipts ? "receipts" : undefined,
-  ].filter(Boolean);
+  const labels = capabilityLabels(capabilities);
   return labels.length ? ` {${labels.join(",")}}` : "";
 }
 

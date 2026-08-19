@@ -7,7 +7,12 @@ import { type CoordinationEntry, listCoordination } from "./coordination.ts";
 import { canonicalProject, displayName } from "./paths.ts";
 import { readListenerSnapshot } from "./presence.ts";
 import { readProcessSnapshot } from "./processSnapshot.ts";
-import { type ProcessScan, type Registration, listLive } from "./registry.ts";
+import {
+  type ProcessScan,
+  type Registration,
+  capabilityLabels,
+  listLive,
+} from "./registry.ts";
 import {
   activityTag,
   claudeSessions,
@@ -154,15 +159,7 @@ function presence(registrations: Registration[]): PresenceEntry[] {
         activity: activityTag(sessionMeta?.status, lastActive),
         lastActive: new Date(lastActive).toISOString(),
         client: r.client,
-        capabilities: r.capabilities
-          ? [
-              r.capabilities.channelPush ? "channel" : "poll",
-              r.capabilities.nativePeerMessaging ? "native-peer" : undefined,
-              r.capabilities.claims ? "claims" : undefined,
-              r.capabilities.workLeases ? "work" : undefined,
-              r.capabilities.receipts ? "receipts" : undefined,
-            ].filter((value): value is string => Boolean(value))
-          : [],
+        capabilities: r.capabilities ? capabilityLabels(r.capabilities) : [],
         inboundPolicy: r.inboundPolicy ?? "accept",
         muted: r.muted,
         pid: r.pid,
