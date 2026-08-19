@@ -94,6 +94,22 @@ function channelLabel(status?: ChannelPushStatus): string {
     : `channel:${status}`;
 }
 
+/** Whether this session is known to be unable to receive a channel push.
+ *
+ * Only an explicit degraded diagnosis counts. An absent or `"unknown"` status
+ * is the absence of evidence — a session registered by a build that predates
+ * the diagnosis carries no status at all — and a poll-only session was never
+ * pushed to in the first place, so neither is a fault to report. Getting this
+ * backwards would tell a sender that every long-running peer is unreachable,
+ * which is the same overstatement as `pushed` in the other direction. */
+export function pushIsKnownUnreachable(
+  capabilities?: SessionCapabilities,
+): boolean {
+  if (!capabilities?.channelPush) return false;
+  const status = capabilities.channelPushStatus;
+  return status === "host-not-loaded" || status === "identity-unauthorized";
+}
+
 export interface ProcessInfo {
   start: string; // lstart tokens joined with single spaces
   command: string;

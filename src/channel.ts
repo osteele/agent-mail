@@ -69,6 +69,7 @@ import {
   inboundPolicy,
   isMuted,
   listLive,
+  pushIsKnownUnreachable,
   register,
   scanProcesses,
   setInboundPolicy,
@@ -734,13 +735,27 @@ function describeAudience(target: string, toSession?: string): string {
   const peers = liveSessions(target);
   if (toSession) {
     const match = peers.find((peer) => peer.sessionId === toSession);
-    return `to ${match?.displayName ?? toSession}`;
+    const suffix = pushIsKnownUnreachable(match?.capabilities)
+      ? " (cannot receive a channel push; it waits for their next inbox check)"
+      : "";
+    return `to ${match?.displayName ?? toSession}${suffix}`;
   }
   const others = peers.filter((peer) => peer.sessionId !== sessionId);
   if (others.length === 0) {
     return `no sessions listening in ${displayName(target)} — it will be read when one attaches`;
   }
-  return `to ${others.length} live session${others.length === 1 ? "" : "s"} in ${displayName(target)}`;
+  // Counting a session as an audience member says only that it is attached.
+  // Naming the ones whose push is known dead is what stops a sender reading
+  // "3 live sessions" as "3 agents will see this shortly" — the misreading
+  // that produced duplicate sends and peers blamed for being slow.
+  const deaf = others.filter((peer) =>
+    pushIsKnownUnreachable(peer.capabilities),
+  ).length;
+  const suffix =
+    deaf > 0
+      ? ` (${deaf} of them cannot receive a channel push; their copy waits for an inbox check)`
+      : "";
+  return `to ${others.length} live session${others.length === 1 ? "" : "s"} in ${displayName(target)}${suffix}`;
 }
 
 async function deliver(msg: Message, audience: string): Promise<string> {

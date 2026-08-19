@@ -19,6 +19,7 @@ import {
   capabilityLabels,
   listLiveInProject,
   parsePsLine,
+  pushIsKnownUnreachable,
   register,
   scanProcesses,
   setInboundPolicy,
@@ -334,6 +335,55 @@ test("an unverifiable diagnosis is not reported as a failure", () => {
     })[0],
   ).toBe("channel");
   expect(capabilityLabels(CLAUDE_CAPABILITIES)[0]).toBe("channel");
+});
+
+test("a sender is told only about pushes known to be dead", () => {
+  // The send-time count exists so "N live sessions" is not read as "N agents
+  // will see this shortly". It must be conservative in both directions: a
+  // degraded diagnosis counts, and everything else does not.
+  expect(
+    pushIsKnownUnreachable({
+      ...CLAUDE_CAPABILITIES,
+      channelPushStatus: "host-not-loaded",
+    }),
+  ).toBe(true);
+  expect(
+    pushIsKnownUnreachable({
+      ...CLAUDE_CAPABILITIES,
+      channelPushStatus: "identity-unauthorized",
+    }),
+  ).toBe(true);
+  expect(
+    pushIsKnownUnreachable({
+      ...CLAUDE_CAPABILITIES,
+      channelPushStatus: "authorized",
+    }),
+  ).toBe(false);
+});
+
+test("an unknown or absent diagnosis is not reported as unreachable", () => {
+  // Sessions registered by a build predating the diagnosis carry no status at
+  // all. Counting those as dead would tell a sender every long-running peer is
+  // unreachable — the same overstatement as `pushed`, pointed the other way.
+  expect(
+    pushIsKnownUnreachable({
+      ...CLAUDE_CAPABILITIES,
+      channelPushStatus: "unknown",
+    }),
+  ).toBe(false);
+  expect(pushIsKnownUnreachable(CLAUDE_CAPABILITIES)).toBe(false);
+  expect(pushIsKnownUnreachable(undefined)).toBe(false);
+});
+
+test("a poll-only session is not counted as an unreachable push", () => {
+  // Codex never had channel push; that is its normal mode, not a fault.
+  expect(
+    pushIsKnownUnreachable({
+      ...CLAUDE_CAPABILITIES,
+      channelPush: false,
+      channelPushStatus: "host-not-loaded",
+    }),
+  ).toBe(false);
 });
 
 test("a host without channel push is polling, whatever the diagnosis says", () => {
