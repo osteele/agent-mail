@@ -13,7 +13,9 @@
  * SIGTERM: graceful stop. SIGHUP: reload config (Slack webhook, echo mode).
  */
 
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { type Config, loadConfig } from "./config.ts";
 import { dashboardResponse } from "./dashboard.ts";
 import { LOG_PATH, PID_PATH, canonicalProject, ensureDirs } from "./paths.ts";
@@ -272,14 +274,58 @@ function tickPresence(): void {
  * by its own `generatedAt`, so an unrefreshed file ages out of validity on its
  * own rather than needing to be deleted. */
 let refreshing = false;
+let missingWeftLogged = false;
+
+/** Absolute path to weft, or undefined when it cannot be found.
+ *
+ * The daemon runs under launchd with a minimal PATH, so a bare name resolves
+ * in an interactive shell and not here. Probing the usual install locations
+ * keeps the refresher working without making the daemon depend on a login
+ * environment it does not have. */
+function resolveWeft(): string | undefined {
+  const configured = process.env.AGENT_MAIL_WEFT_BIN;
+  if (configured) return existsSync(configured) ? configured : undefined;
+  const found = Bun.which("weft");
+  if (found) return found;
+  for (const candidate of [
+    join(homedir(), "go", "bin", "weft"),
+    "/opt/homebrew/bin/weft",
+    "/usr/local/bin/weft",
+    join(homedir(), ".local", "bin", "weft"),
+  ]) {
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
 
 function tickWeftJobs(): void {
   if (refreshing) return;
+  const weft = resolveWeft();
+  if (!weft) {
+    if (!missingWeftLogged) {
+      missingWeftLogged = true;
+      log("weft jobs snapshot: weft not found, field stays empty");
+    }
+    return;
+  }
   refreshing = true;
-  const proc = Bun.spawn(
-    ["weft", "list", "jobs", "--unprocessed", "--format", "json"],
-    { stdout: "pipe", stderr: "ignore" },
-  );
+  // Bun.spawn throws synchronously when the executable is missing, so it must
+  // be inside the try: a rejected promise is caught below, a throw here would
+  // take the daemon down. It did once, under launchd, whose PATH omits weft.
+  let proc: Bun.Subprocess<"ignore", "pipe", "ignore">;
+  try {
+    proc = Bun.spawn(
+      [weft, "list", "jobs", "--unprocessed", "--format", "json"],
+      {
+        stdout: "pipe",
+        stderr: "ignore",
+      },
+    );
+  } catch (error) {
+    refreshing = false;
+    log(`weft jobs snapshot failed to start: ${error}`);
+    return;
+  }
   Bun.readableStreamToText(proc.stdout)
     .then(async (out) => {
       const code = await proc.exited;
