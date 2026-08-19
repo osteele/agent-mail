@@ -1,14 +1,89 @@
 # agent-mail
 
-Durable local mail and coordination for Claude Code and Codex sessions.
-agent-mail supports Claude↔Claude, Claude↔Codex, and Codex↔Codex messages,
-including sessions in different project directories. It pushes messages into
-Claude Code through [channels](https://code.claude.com/docs/en/channels), keeps
-project inboxes on disk, threads replies, echoes traffic to Slack, coordinates
-file ownership, and provides web and Slack dashboards.
+You are running several coding agents at once, in different projects and
+different tools. One of them finishes something another is waiting on. Today
+you notice, and carry the message across yourself.
 
-Other agents, the CLI, and tools such as [weft](https://github.com/osteele/weft)
-can send messages. For example, weft can report when a job finishes.
+agent-mail is a local message bus for those sessions. A message lands in a
+project's inbox on disk whether or not anyone is listening, and reaches a
+Claude Code session in context when one is.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant QL as Quiet Lantern<br/>Claude, project augur
+    participant Spool as agent-mail spool
+    participant Slack as Slack agent-mail channel
+    participant SO as Silver Otter<br/>Codex, project augur
+
+    QL->>Spool: send_mail to Silver Otter<br/>"Can you verify the latency table?"
+    Spool-->>Slack: 12:14 augur: Quiet Lantern to Silver Otter
+    SO->>Spool: check_inbox
+    Note over SO,Spool: Codex has no channel push,<br/>so it reads when it asks
+    Spool-->>SO: "Can you verify the latency table?"
+    SO->>Spool: send_mail reply_to=msg-104<br/>"Row 21 still uses milliseconds."
+    Spool-->>Slack: 12:17 augur: Silver Otter to Quiet Lantern
+    Spool->>QL: channel push
+    Note over Spool,QL: Claude Code with the channel loaded,<br/>so the reply arrives unasked
+```
+
+Sessions address each other by name across project directories. Replies
+thread. Automation can send too: the CLI, an HTTP client, or a tool such as
+[weft](https://github.com/osteele/weft) reporting a finished job. Alongside the
+mail, agents can take advisory claims on files and on units of work, so two of
+them do not edit the same thing at once.
+
+## Choosing between this and Claude Code's built-ins
+
+Claude Code ships two things that overlap with agent-mail. If you are already
+using either, start here.
+
+**[Cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging)**
+(`ListAgents` and `SendMessage`, Claude Code 2.1.224) sends a message to a
+named, running Claude session on the same machine. It needs no daemon and no
+configuration. For a direct message to a live Claude session, use it.
+
+**[Agent teams](https://code.claude.com/docs/en/agent-teams)** (experimental,
+off by default) let one session spawn teammates that share a task list and
+message each other through per-agent mailboxes, with file locking on task
+claims. For parallel work you are launching now, under one lead, in one
+project, use it.
+
+Reach for agent-mail when the shape is different in one of these ways:
+
+- **The sessions already exist and nobody spawned them.** Agent teams have a
+  lead and teammates for the lead's lifetime, one team per session. agent-mail
+  addresses peers that started independently, in their own projects, with no
+  hierarchy and nothing to promote or transfer.
+- **Not every endpoint is Claude Code.** Codex sessions use the same tools and
+  the same inboxes. So do the CLI, weft, and any HTTP client.
+- **The recipient may not be running.** A message waits in the project's inbox
+  and is read when a session next attaches. A team's config is removed when its
+  session ends.
+- **The unit of coordination is a file or a plan, not a task-list item.** Path
+  claims express edit exclusion, work leases express who is responsible for a
+  logical unit, and the two are deliberately separate.
+- **You want the traffic to be inspectable**: unread state, threads, receipts,
+  Slack echo, and dashboards.
+
+The transports coexist, and a native `SendMessage` does not pass through
+agent-mail unless you install the audit hook. See
+[Claude Code's native cross-session messaging](#claude-codes-native-cross-session-messaging)
+for running both without double-delivering.
+
+The first commit here is from June 2026, when passing a message between two
+Claude sessions meant a human copying it. Claude Code has since grown its own
+answers, and where they overlap they are the better ones: they need no daemon,
+no channel flag, and no second inbox to reason about. What kept this project
+going is the part the overlap does not reach, and the list above is that part
+rather than a pitch. If your sessions are all Claude Code, all spawned
+together, and all still running, you probably do not need this.
+
+A sibling project, [agent-lore](https://github.com/osteele/agent-lore), covers
+the adjacent case rather than competing with this one: mail carries something
+one session needs to tell another now, while lore is where a session records
+what it worked out for whoever comes next. If you find yourself sending the
+same explanation to a third agent, that is the boundary.
 
 ## Quick start
 
@@ -53,7 +128,7 @@ it — is a separate opt-in with four parts, all of which must line up:
    install` does not do for you:
 
    ```bash
-   claude plugin marketplace add /Users/osteele/code/agent-tools/agent-mail
+   claude plugin marketplace add /path/to/agent-mail
    claude plugin install agent-mail@osteele-local
    ```
 
@@ -76,7 +151,7 @@ it — is a separate opt-in with four parts, all of which must line up:
    ```
 
    This is a per-launch decision, so it is best set once for every session
-   rather than typed. With [claude-wrapper](../claude-wrapper), put it in global
+   rather than typed. With a launcher wrapper, put it in global
    `extra_args`; scoping it to some paths is what previously left whole
    directories silently push-less.
 
@@ -597,27 +672,6 @@ Environment-variable equivalents are `AGENT_MAIL_SLACK_BOT_TOKEN` and
 
 ```bash
 agent-mail slack-dashboard
-```
-
-Example:
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant QL as Quiet Lantern<br/>Claude, project augur
-    participant Spool as agent-mail spool
-    participant Slack as Slack agent-mail channel
-    participant SO as Silver Otter<br/>Codex, project augur
-
-    QL->>Spool: send_mail to Silver Otter<br/>"Can you verify the latency table?"
-    Spool-->>Slack: 12:14 augur: Quiet Lantern to Silver Otter
-    SO->>Spool: check_inbox
-    Note over SO,Spool: Codex has no channel push,<br/>so it reads when it asks
-    Spool-->>SO: "Can you verify the latency table?"
-    SO->>Spool: send_mail reply_to=msg-104<br/>"Row 21 still uses milliseconds."
-    Spool-->>Slack: 12:17 augur: Silver Otter to Quiet Lantern
-    Spool->>QL: channel push
-    Note over Spool,QL: Claude Code with the channel loaded,<br/>so the reply arrives unasked
 ```
 
 ## CLI
