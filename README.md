@@ -91,8 +91,10 @@ Both sit in a wider set of agent infrastructure, listed at
 ## Quick start
 
 agent-mail runs from a source checkout and requires
-[Bun](https://bun.com/docs/installation). Its automatic daemon installer
-currently uses macOS launchd.
+[Bun](https://bun.com/docs/installation). There is no `npx` one-liner and no
+published package: the daemon serves HTTP through Bun's runtime APIs, and the
+CLI is a TypeScript entry point with a `bun` shebang. Its automatic daemon
+installer currently uses macOS launchd.
 
 **Platforms.** macOS and Linux are tested in CI. Windows is unsupported:
 session liveness is read from `ps`, and without it the registry cannot prune
@@ -255,71 +257,6 @@ Do not send the same message through both transports. A native message that is
 held for approval may still be delivered later. Claude Code's
 `crossSessionInbound` setting controls native messages. agent-mail's inbound
 policy controls agent-mail messages. The policies are independent.
-
-## Architecture
-
-State lives in append-only files under `~/.claude/agent-mail/`: a spool per
-project, receipts beside it, and a registry of attached sessions. The daemon
-appends to spools and echoes to Slack; each session runs an MCP server that
-reads them.
-
-[docs/architecture.md](docs/architecture.md) covers the rest: addressing,
-presence, muting, delivery controls and receipts, threads, path claims, work
-leases, transfers, and recovery.
-
-## Client integration and updates
-
-The [quick start](#quick-start) separates two installation steps. `bun link`
-adds a shell command that points to this checkout. `agent-mail install` creates
-the launchd service and registers the checkout with Claude Code and Codex.
-
-The installer uses `codex mcp add` when no Codex entry exists. It preserves an
-entry that already matches this checkout. If either client already uses the
-name for a different checkout, the installer leaves it unchanged. Inspect the
-Codex entry with `codex mcp get agent-mail --json`. Use `--replace-codex` or
-`--replace-claude` to replace an entry deliberately. Use `--no-codex` to skip
-Codex registration.
-
-When the `agent-mail` plugin is enabled in `~/.claude/settings.json`, the
-installer does not write a user-scope `mcpServers` entry, and removes one that
-belongs to this checkout. Both register the same server name, so Claude keeps
-only one — the user-scope entry. That instance pushes under the channel identity
-`server:agent-mail` rather than `plugin:agent-mail@<marketplace>`, which the
-host has not authorized, so every push is discarded without an error while tools
-and the CLI keep working. If the entry points at a different checkout, the
-installer reports it and leaves it in place; remove it with `claude mcp remove
-agent-mail`. Restart Claude sessions afterward.
-
-Each session's MCP server log records this at startup when push cannot land,
-naming the identity it would push under and the channels the host authorized.
-
-Claude Code's channel flag bypasses the research-preview allowlist for the
-named local server. It enables channel push without changing the MCP tools.
-
-To include successful native Claude `SendMessage` calls in dashboards and
-Slack without redelivering them, enable the optional audit hook:
-
-```bash
-agent-mail install --native-audit
-```
-
-The hook is added to `~/.claude/settings.json` (or
-`$CLAUDE_CONFIG_DIR/settings.json`) without replacing other hooks. `agent-mail
-uninstall` removes only the hook and MCP registrations that belong to this
-checkout.
-
-Restart every existing Claude Code and Codex session after an integration
-change or an agent-mail code update. Each session owns a long-running MCP
-process, so it does not load new tool schemas or server code automatically.
-Restart the daemon after changing daemon code:
-
-```bash
-agent-mail restart
-```
-
-Daemon configuration changes do not require a process restart. Reload them
-with `agent-mail graceful`. Codex provides tools and presence registration,
-but not push delivery.
 
 ## Connecting to Slack
 
@@ -630,6 +567,71 @@ text. All inbound mail is explicitly marked untrusted and cannot approve
 permissions or override the receiving session's rules. Use `hold` or `refuse`
 for sessions that should not accept agent-mail automatically, and do not expose
 the port.
+
+## Architecture
+
+State lives in append-only files under `~/.claude/agent-mail/`: a spool per
+project, receipts beside it, and a registry of attached sessions. The daemon
+appends to spools and echoes to Slack; each session runs an MCP server that
+reads them.
+
+[docs/architecture.md](docs/architecture.md) covers the rest: addressing,
+presence, muting, delivery controls and receipts, threads, path claims, work
+leases, transfers, and recovery.
+
+## Client integration and updates
+
+The [quick start](#quick-start) separates two installation steps. `bun link`
+adds a shell command that points to this checkout. `agent-mail install` creates
+the launchd service and registers the checkout with Claude Code and Codex.
+
+The installer uses `codex mcp add` when no Codex entry exists. It preserves an
+entry that already matches this checkout. If either client already uses the
+name for a different checkout, the installer leaves it unchanged. Inspect the
+Codex entry with `codex mcp get agent-mail --json`. Use `--replace-codex` or
+`--replace-claude` to replace an entry deliberately. Use `--no-codex` to skip
+Codex registration.
+
+When the `agent-mail` plugin is enabled in `~/.claude/settings.json`, the
+installer does not write a user-scope `mcpServers` entry, and removes one that
+belongs to this checkout. Both register the same server name, so Claude keeps
+only one — the user-scope entry. That instance pushes under the channel identity
+`server:agent-mail` rather than `plugin:agent-mail@<marketplace>`, which the
+host has not authorized, so every push is discarded without an error while tools
+and the CLI keep working. If the entry points at a different checkout, the
+installer reports it and leaves it in place; remove it with `claude mcp remove
+agent-mail`. Restart Claude sessions afterward.
+
+Each session's MCP server log records this at startup when push cannot land,
+naming the identity it would push under and the channels the host authorized.
+
+Claude Code's channel flag bypasses the research-preview allowlist for the
+named local server. It enables channel push without changing the MCP tools.
+
+To include successful native Claude `SendMessage` calls in dashboards and
+Slack without redelivering them, enable the optional audit hook:
+
+```bash
+agent-mail install --native-audit
+```
+
+The hook is added to `~/.claude/settings.json` (or
+`$CLAUDE_CONFIG_DIR/settings.json`) without replacing other hooks. `agent-mail
+uninstall` removes only the hook and MCP registrations that belong to this
+checkout.
+
+Restart every existing Claude Code and Codex session after an integration
+change or an agent-mail code update. Each session owns a long-running MCP
+process, so it does not load new tool schemas or server code automatically.
+Restart the daemon after changing daemon code:
+
+```bash
+agent-mail restart
+```
+
+Daemon configuration changes do not require a process restart. Reload them
+with `agent-mail graceful`. Codex provides tools and presence registration,
+but not push delivery.
 
 ## License
 
