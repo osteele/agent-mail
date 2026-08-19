@@ -1,0 +1,21 @@
+{
+  // Publish-time build. Development never runs this: Bun executes the .ts
+  // sources directly, and `bun run check` still typechecks with noEmit.
+  //
+  // It exists because Node refuses to strip types for files under
+  // node_modules (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), so a package
+  // that ships .ts is installable but not runnable. That restriction is not
+  // version-gated; shipping JS is the only way an npm or npx install works.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": "src",
+    // Source imports siblings as "./x.ts", which is what lets Bun and Node's
+    // stripper run them unbuilt. This rewrites those specifiers to "./x.js" in
+    // the emitted output so the shipped package resolves.
+    "rewriteRelativeImportExtensions": true,
+    "sourceMap": true
+  },
+  "exclude": ["src/**/*.test.ts", "src/slowTests.ts"]
+}

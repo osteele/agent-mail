@@ -90,32 +90,24 @@ Both sit in a wider set of agent infrastructure, listed at
 
 ## Quick start
 
-agent-mail is installed by cloning it, and requires
-[Bun](https://bun.com/docs/installation). Its automatic daemon installer
-currently uses macOS launchd.
+Requires Node 22.18 or later. Its automatic daemon installer currently uses
+macOS launchd.
+
+```bash
+npm install -g github:osteele/agent-mail
+agent-mail install
+agent-mail status
+```
+
+`agent-mail install` starts the daemon and registers agent-mail as an MCP
+server for Claude Code and Codex.
+
+Restart existing Claude Code and Codex sessions after installation.
 
 **Platforms.** macOS and Linux are tested in CI. Windows is unsupported:
 session liveness is read from `ps`, and without it the registry cannot prune
 sessions or expire claims. See
 [docs/decisions/0005](docs/decisions/0005-no-windows-support.md).
-
-From the checkout:
-
-```bash
-bun install
-bun link
-agent-mail install
-agent-mail status
-agent-mail dashboard --open
-```
-
-[`bun link`](https://bun.com/docs/pm/cli/link) adds the `agent-mail` command to
-Bun's global binary directory, usually `~/.bun/bin`, and points it at the
-current checkout. Make sure that directory is on `PATH`. `agent-mail install`
-starts the daemon and registers the checkout as an MCP server for Claude Code
-and Codex.
-
-Restart existing Claude Code and Codex sessions after installation.
 
 ### Registering with other agents
 
@@ -128,8 +120,8 @@ knows the config format and location for about twenty of them, including kimi,
 opencode, Cursor, Zed, Gemini CLI, and VS Code:
 
 ```bash
-npx add-mcp "$(command -v bun)" \
-  --args /path/to/agent-mail/src/channel.ts \
+npx add-mcp "$(command -v node)" \
+  --args "$(npm root -g)/agent-mail/dist/channel.js" \
   --name agent-mail --global --agent cursor --agent zed
 ```
 
@@ -579,24 +571,26 @@ leases, transfers, and recovery.
 
 ## Client integration and updates
 
-The [quick start](#quick-start) separates two installation steps. `bun link`
-adds a shell command that points to this checkout. `agent-mail install` creates
-the launchd service and registers the checkout with Claude Code and Codex.
+Installing the package puts the `agent-mail` command on `PATH`;
+`agent-mail install` is the separate step that creates the launchd service and
+registers agent-mail with Claude Code and Codex. It registers whichever copy
+you ran it from, and with whichever runtime ran it, so the same command works
+from an installed package and from a development checkout.
 
 The installer uses `codex mcp add` when no Codex entry exists. It preserves an
-entry that already matches this checkout. If either client already uses the
-name for a different checkout, the installer leaves it unchanged. Inspect the
+entry that already matches this installation. If either client already uses the
+name for a different one, the installer leaves it unchanged. Inspect the
 Codex entry with `codex mcp get agent-mail --json`. Use `--replace-codex` or
 `--replace-claude` to replace an entry deliberately. Use `--no-codex` to skip
 Codex registration.
 
 When the `agent-mail` plugin is enabled in `~/.claude/settings.json`, the
 installer does not write a user-scope `mcpServers` entry, and removes one that
-belongs to this checkout. Both register the same server name, so Claude keeps
+belongs to this installation. Both register the same server name, so Claude keeps
 only one — the user-scope entry. That instance pushes under the channel identity
 `server:agent-mail` rather than `plugin:agent-mail@<marketplace>`, which the
 host has not authorized, so every push is discarded without an error while tools
-and the CLI keep working. If the entry points at a different checkout, the
+and the CLI keep working. If the entry points somewhere else, the
 installer reports it and leaves it in place; remove it with `claude mcp remove
 agent-mail`. Restart Claude sessions afterward.
 
@@ -616,7 +610,7 @@ agent-mail install --native-audit
 The hook is added to `~/.claude/settings.json` (or
 `$CLAUDE_CONFIG_DIR/settings.json`) without replacing other hooks. `agent-mail
 uninstall` removes only the hook and MCP registrations that belong to this
-checkout.
+installation.
 
 Restart every existing Claude Code and Codex session after an integration
 change or an agent-mail code update. Each session owns a long-running MCP
@@ -630,6 +624,42 @@ agent-mail restart
 Daemon configuration changes do not require a process restart. Reload them
 with `agent-mail graceful`. Codex provides tools and presence registration,
 but not push delivery.
+
+## Development
+
+Development runs from a checkout under [Bun](https://bun.com/docs/installation),
+which executes the TypeScript sources directly:
+
+```bash
+git clone https://github.com/osteele/agent-mail
+cd agent-mail
+bun install
+bun link
+agent-mail install
+```
+
+[`bun link`](https://bun.com/docs/pm/cli/link) points the `agent-mail` command
+at the checkout instead of the installed package; make sure Bun's global binary
+directory, usually `~/.bun/bin`, is on `PATH`.
+
+```bash
+bun run check    # biome + tsc --noEmit
+bun test
+bun run build    # emit dist/, as the published package ships
+```
+
+The code runs under both Bun and Node. Everything that differs between them —
+subprocesses, the HTTP server, synchronous sleeps, reading a slice of a file —
+goes through `src/runtime.ts`, which dispatches on the host; no other module
+tests which runtime it is on. Under Bun each function delegates to the Bun API
+it replaced, so the runtime used in development stays the fast path.
+
+The published package ships JavaScript rather than the TypeScript sources.
+That is not a preference: Node refuses to strip types for files under
+`node_modules`, so a package shipping `.ts` installs but cannot run. `bun run
+build` is what `npm` runs through `prepare` on a GitHub install.
+
+The test suite uses `bun:test` and is not part of the published package.
 
 ## License
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /** agent-mail CLI.
  *
  * Messaging:
@@ -43,7 +43,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, extname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describeChannelSetup, inspectChannelSetup } from "./channelSetup.ts";
 import {
   type Claim,
@@ -93,6 +94,7 @@ import {
   setInboundPolicy,
   setMuted,
 } from "./registry.ts";
+import { readStdinText, sleepSync } from "./runtime.ts";
 import {
   activityTag,
   claudeSessions,
@@ -167,10 +169,16 @@ function sessionActivity(r: Registration, names = claudeSessions()): string {
   return activityTag(meta?.status, lastActivityMs(r, meta));
 }
 
-const SRC_DIR = dirname(new URL(import.meta.url).pathname);
-const DAEMON_TS = join(SRC_DIR, "daemon.ts");
-const CHANNEL_TS = join(SRC_DIR, "channel.ts");
-const NATIVE_AUDIT_TS = join(SRC_DIR, "nativeAudit.ts");
+const SELF = fileURLToPath(import.meta.url);
+const SRC_DIR = dirname(SELF);
+// ".ts" in a checkout, ".js" in a published package: the sibling entry points
+// are whatever this module itself is, since the publish build emits JS and
+// rewrites the imports. Hardcoding ".ts" made every registration the installer
+// wrote point at a file that a package install does not contain.
+const ENTRY_EXT = extname(SELF);
+const DAEMON_ENTRY = join(SRC_DIR, `daemon${ENTRY_EXT}`);
+const CHANNEL_ENTRY = join(SRC_DIR, `channel${ENTRY_EXT}`);
+const NATIVE_AUDIT_ENTRY = join(SRC_DIR, `nativeAudit${ENTRY_EXT}`);
 const PLIST_PATH = join(
   homedir(),
   "Library",
@@ -183,8 +191,13 @@ const CLAUDE_SETTINGS = join(
   "settings.json",
 );
 
-function bunPath(): string {
-  return process.execPath; // the bun binary running this script
+/** The runtime binary to launch agent-mail's other entry points with.
+ *
+ * Whichever interpreter is running this CLI: `node` for an npm install, `bun`
+ * in a Bun checkout. Registrations and the launchd plist are written with it,
+ * so an install never hardcodes a runtime the user may not have. */
+function runtimePath(): string {
+  return process.execPath;
 }
 
 // --- argument parsing --------------------------------------------------------
@@ -255,7 +268,7 @@ function cmdStart(): void {
     console.log("daemon started via launchd");
   } else {
     ensureDirs();
-    const child = spawn(bunPath(), [DAEMON_TS], {
+    const child = spawn(runtimePath(), [DAEMON_ENTRY], {
       detached: true,
       stdio: "ignore",
     });
@@ -291,7 +304,7 @@ function cmdRestart(): void {
   }
   cmdStop();
   // brief pause for the port to free
-  Bun.sleepSync(500);
+  sleepSync(500);
   cmdStart();
 }
 
@@ -335,7 +348,7 @@ async function cmdStatus(): Promise<void> {
   // Observed state, not instructions; ~2s (`claude plugin list`), so explicit
   // commands only — never the status line or other latency-bound surfaces.
   for (const line of describeChannelSetup(
-    inspectChannelSetup(CHANNEL_TS),
+    inspectChannelSetup(CHANNEL_ENTRY),
     dirname(SRC_DIR),
   ))
     console.log(line);
@@ -709,7 +722,7 @@ interface StatusLinePayload {
 async function readStatusLinePayload(): Promise<StatusLinePayload | undefined> {
   if (process.stdin.isTTY) return undefined;
   try {
-    const text = await Bun.stdin.text();
+    const text = await readStdinText();
     return text.trim() ? (JSON.parse(text) as StatusLinePayload) : undefined;
   } catch {
     // Not JSON, or nothing arrived. Fall through to the flags rather than
@@ -1328,8 +1341,8 @@ function plistContents(): string {
   <key>Label</key><string>${LAUNCHD_LABEL}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${bunPath()}</string>
-    <string>${DAEMON_TS}</string>
+    <string>${runtimePath()}</string>
+    <string>${DAEMON_ENTRY}</string>
   </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key>
@@ -1366,7 +1379,7 @@ function registerMcpServer(replace: boolean): void {
       );
       return;
     }
-    if (claudeRegistrationMatches(existing, bunPath(), CHANNEL_TS)) {
+    if (claudeRegistrationMatches(existing, runtimePath(), CHANNEL_ENTRY)) {
       const { "agent-mail": _removed, ...rest } = servers;
       doc.mcpServers = rest;
       writeFileSync(CLAUDE_JSON, JSON.stringify(doc, null, 2));
@@ -1381,7 +1394,7 @@ function registerMcpServer(replace: boolean): void {
     return;
   }
   if (existing) {
-    if (claudeRegistrationMatches(existing, bunPath(), CHANNEL_TS)) {
+    if (claudeRegistrationMatches(existing, runtimePath(), CHANNEL_ENTRY)) {
       console.log("Claude MCP registration already matches this checkout");
       return;
     }
@@ -1395,8 +1408,8 @@ function registerMcpServer(replace: boolean): void {
   }
   servers["agent-mail"] = {
     type: "stdio",
-    command: bunPath(),
-    args: [CHANNEL_TS],
+    command: runtimePath(),
+    args: [CHANNEL_ENTRY],
     env: {},
   };
   doc.mcpServers = servers;
@@ -1453,7 +1466,9 @@ function registerCodex(replace: boolean): void {
     return;
   }
   if (registration.status === "present") {
-    if (codexRegistrationMatches(registration.value, bunPath(), CHANNEL_TS)) {
+    if (
+      codexRegistrationMatches(registration.value, runtimePath(), CHANNEL_ENTRY)
+    ) {
       console.log("Codex MCP registration already matches this checkout");
       return;
     }
@@ -1466,7 +1481,7 @@ function registerCodex(replace: boolean): void {
     }
     if (!runCodexMcp(["remove", "agent-mail"])) return;
   }
-  if (runCodexMcp(["add", "agent-mail", "--", bunPath(), CHANNEL_TS])) {
+  if (runCodexMcp(["add", "agent-mail", "--", runtimePath(), CHANNEL_ENTRY])) {
     console.log("registered agent-mail with Codex");
   }
 }
@@ -1475,7 +1490,9 @@ function unregisterCodex(): void {
   const registration = codexRegistration();
   if (registration.status === "unavailable") return;
   if (registration.status !== "present") return;
-  if (!codexRegistrationMatches(registration.value, bunPath(), CHANNEL_TS)) {
+  if (
+    !codexRegistrationMatches(registration.value, runtimePath(), CHANNEL_ENTRY)
+  ) {
     console.error(
       "Codex agent-mail entry belongs to a different checkout; leaving it unchanged",
     );
@@ -1498,8 +1515,8 @@ function readClaudeSettings(): Record<string, unknown> {
 function installNativeAuditHook(): void {
   const result = addNativeAuditHook(
     readClaudeSettings(),
-    bunPath(),
-    NATIVE_AUDIT_TS,
+    runtimePath(),
+    NATIVE_AUDIT_ENTRY,
   );
   if (!result.changed) {
     console.log("Claude native SendMessage audit hook already installed");
@@ -1515,7 +1532,10 @@ function installNativeAuditHook(): void {
 
 function uninstallNativeAuditHook(): void {
   if (!existsSync(CLAUDE_SETTINGS)) return;
-  const result = removeNativeAuditHook(readClaudeSettings(), NATIVE_AUDIT_TS);
+  const result = removeNativeAuditHook(
+    readClaudeSettings(),
+    NATIVE_AUDIT_ENTRY,
+  );
   if (!result.changed) return;
   writeFileSync(
     CLAUDE_SETTINGS,
@@ -1539,6 +1559,9 @@ function cmdInstall(flags: Record<string, string | boolean>): void {
       "# message_rate_limit_per_minute = 60",
       "# default_message_ttl_seconds = 0  # 0 means no default expiry",
       "# held_message_limit = 100",
+      "# Serve the HTTP dashboard. Off by default: it renders every project's",
+      "# sessions, and the daemon port is reachable by any local process.",
+      "# dashboard = true",
       "# Editable Slack dashboard (agent-mail slack-dashboard) needs a bot token:",
       '# slack_bot_token = "xoxb-..."  # chat:write scope; invite the bot to the channel',
       '# slack_channel = "C0123ABCD"',
@@ -1558,7 +1581,7 @@ function cmdInstall(flags: Record<string, string | boolean>): void {
   const pid = daemonPid();
   if (pid !== null) {
     process.kill(pid, "SIGTERM");
-    Bun.sleepSync(500);
+    sleepSync(500);
   }
   launchctl("bootstrap", guiDomain(), PLIST_PATH);
   console.log("daemon bootstrapped via launchd (starts at boot)");
@@ -1571,7 +1594,7 @@ function cmdInstall(flags: Record<string, string | boolean>): void {
   // here go stale; the state cannot (see channelSetup.ts).
   console.log("");
   for (const line of describeChannelSetup(
-    inspectChannelSetup(CHANNEL_TS),
+    inspectChannelSetup(CHANNEL_ENTRY),
     dirname(SRC_DIR),
   ))
     console.log(line);
@@ -1595,7 +1618,11 @@ function cmdUninstall(): void {
     const servers = doc.mcpServers as Record<string, unknown> | undefined;
     if (
       servers &&
-      claudeRegistrationMatches(servers["agent-mail"], bunPath(), CHANNEL_TS)
+      claudeRegistrationMatches(
+        servers["agent-mail"],
+        runtimePath(),
+        CHANNEL_ENTRY,
+      )
     ) {
       const { "agent-mail": _removed, ...rest } = servers;
       doc.mcpServers = rest;
@@ -1615,6 +1642,17 @@ async function cmdDashboard(
   flags: Record<string, string | boolean>,
 ): Promise<void> {
   const config = loadConfig();
+  if (!config.dashboard) {
+    // Refused rather than treated as its own opt-in: "off by default" has to
+    // mean the same thing to the person typing this and to the daemon, or the
+    // setting only documents half the feature. The env form turns it on for
+    // one invocation without editing config.
+    console.error(
+      `agent-mail dashboard is off. Enable it with \`dashboard = true\` in ${CONFIG_PATH}, or for this run only:\n  AGENT_MAIL_DASHBOARD=1 agent-mail dashboard`,
+    );
+    process.exitCode = 1;
+    return;
+  }
   if (typeof flags.port !== "string") {
     const url = `http://127.0.0.1:${config.port}/`;
     try {
@@ -1633,7 +1671,7 @@ async function cmdDashboard(
   }
   const port =
     typeof flags.port === "string" ? Number(flags.port) : config.port + 1;
-  const server = serveDashboard(port);
+  const server = await serveDashboard(port);
   const url = `http://127.0.0.1:${server.port}/`;
   console.log(`agent-mail dashboard → ${url}`);
   if (flags.open === true) openBrowser(url);
@@ -1806,7 +1844,8 @@ Dashboards:
                         when available; --no-sync reads filesystem snapshots.
   dashboard [--port N] [--open] [--no-tui]
                         Show the persistent daemon dashboard, or serve a
-                        direct-filesystem fallback when the daemon is down
+                        direct-filesystem fallback when the daemon is down.
+                        Off unless dashboard = true is set in config.
   slack-dashboard [--watch <seconds>]
                         Post / refresh the editable Slack dashboard
 

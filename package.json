@@ -5,12 +5,14 @@
   "license": "MIT",
   "type": "module",
   "bin": {
-    "agent-mail": "src/cli.ts"
+    "agent-mail": "dist/cli.js"
   },
   "scripts": {
     "check": "biome check src/ && tsc --noEmit",
     "fix": "biome check --write src/",
-    "test": "bun test"
+    "test": "bun test",
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
@@ -20,5 +22,14 @@
     "@types/bun": "latest",
     "fast-check": "^3.22.0",
     "typescript": "^5.6.0"
-  }
+  },
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ]
 }
