@@ -33,6 +33,11 @@ import {
   shouldEchoMessageToSlack,
 } from "./spool.ts";
 import { flushTransferNotifications, transfers } from "./transfers.ts";
+import {
+  WEFT_JOBS_REFRESH_MS,
+  countBySession,
+  writeWeftJobsSnapshot,
+} from "./weftJobs.ts";
 
 let config: Config = loadConfig();
 
@@ -255,10 +260,55 @@ function tickPresence(): void {
   }
 }
 
+/** Refresh the weft unprocessed-jobs snapshot.
+ *
+ * Deliberately on its own slow timer rather than the 10s presence tick: the
+ * query starts a Go binary and takes seconds, so running it every tick would
+ * occupy a core continuously. `refreshing` skips a cycle whose predecessor is
+ * still running, which matters most exactly when the machine is loaded enough
+ * for the query to outlast the interval.
+ *
+ * A failure logs and leaves the previous snapshot in place. Readers judge it
+ * by its own `generatedAt`, so an unrefreshed file ages out of validity on its
+ * own rather than needing to be deleted. */
+let refreshing = false;
+
+function tickWeftJobs(): void {
+  if (refreshing) return;
+  refreshing = true;
+  const proc = Bun.spawn(
+    ["weft", "list", "jobs", "--unprocessed", "--format", "json"],
+    { stdout: "pipe", stderr: "ignore" },
+  );
+  Bun.readableStreamToText(proc.stdout)
+    .then(async (out) => {
+      const code = await proc.exited;
+      if (code !== 0) throw new Error(`weft exited ${code}`);
+      const counts = countBySession(JSON.parse(out));
+      writeWeftJobsSnapshot(counts);
+      if (counts.total !== lastWeftTotal) {
+        lastWeftTotal = counts.total;
+        log(`weft jobs snapshot: ${counts.total} unprocessed`);
+      }
+    })
+    .catch((error) => {
+      // weft absent, slow, or unparseable output. The stale snapshot stands
+      // and expires on its own.
+      log(`weft jobs snapshot failed: ${error}`);
+    })
+    .finally(() => {
+      refreshing = false;
+    });
+}
+
+let lastWeftTotal = -1;
+
 // Publish once synchronously so the first readers aren't left without a
 // snapshot for a whole tick.
 tickPresence();
 const presenceTimer = setInterval(tickPresence, PRESENCE_TICK_MS);
+tickWeftJobs();
+const weftJobsTimer = setInterval(tickWeftJobs, WEFT_JOBS_REFRESH_MS);
 
 process.on("SIGHUP", () => {
   config = loadConfig();
@@ -272,6 +322,7 @@ for (const sig of ["SIGTERM", "SIGINT"] as const) {
   process.on(sig, () => {
     log(`${sig} received, stopping`);
     clearInterval(presenceTimer);
+    clearInterval(weftJobsTimer);
     server.stop();
     process.exit(0);
   });

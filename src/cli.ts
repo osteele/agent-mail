@@ -120,6 +120,7 @@ import {
   flushTransferNotifications,
   transfers,
 } from "./transfers.ts";
+import { weftJobsForSession } from "./weftJobs.ts";
 import { type WorkLease, type WorkState, work } from "./work.ts";
 import { WorkConflictError } from "./work.ts";
 
@@ -777,6 +778,18 @@ function pushDeliveryFor(
   return "unknown";
 }
 
+/** Unprocessed weft jobs submitted by this session, or "" when nobody knows.
+ *
+ * The empty string covers a stopped daemon, a snapshot past its TTL, and a
+ * weft that never ran, all of which are the same thing to a reader: no claim
+ * is being made. A count of 0 is a different statement, and says weft was
+ * asked. Never runs weft here — the query takes seconds and Claude Code drops
+ * the entire status line when the script overruns its budget. */
+function weftJobsField(sessionId: string | undefined): string {
+  const count = weftJobsForSession(sessionId);
+  return count === undefined ? "" : String(count);
+}
+
 async function cmdStatusLine(
   flags: Record<string, string | boolean>,
 ): Promise<void> {
@@ -811,6 +824,10 @@ async function cmdStatusLine(
           peers.length,
           sessionId ? unreadForSession(project, sessionId) : 0,
           pushDeliveryFor(sessions, sessionId),
+          // Appended, never inserted: the consuming shell script splits
+          // positionally and lives outside this repo, so reordering silently
+          // mislabels every field after the one that moved.
+          weftJobsField(sessionId),
         ].join("\t"),
       );
       return;

@@ -695,15 +695,19 @@ than one that is simply always there. It prints nothing only when the payload
 carries no session id.
 
 `--fields` prints one tab-separated line instead, carrying the name, peer count,
-unread messages, and whether mail reaches this session on its own. A status line
-can then show all four from a single invocation, rather than reimplementing
-agent-mail's registry and spool semantics in shell:
+unread messages, whether mail reaches this session on its own, and unprocessed
+weft jobs this session submitted. A status line can then show all five from a
+single invocation, rather than reimplementing agent-mail's registry and spool
+semantics in shell:
 
 ```
-Quiet Lantern\t2\t0\tpush
-Quiet Lantern\t2\t3\tpull
-Quiet Lantern\t0\t0\tunknown
+Quiet Lantern\t2\t0\tpush\t3
+Quiet Lantern\t2\t3\tpull\t0
+Quiet Lantern\t0\t0\tunknown\t
 ```
+
+Fields are only ever appended. A consuming script splits positionally, so
+inserting one would silently mislabel every field after it.
 
 The fourth field is `push` when channel push is expected to land, `pull` when it
 is not, `unknown` when the session is registered but carries no diagnosis, and
@@ -716,6 +720,15 @@ in how you repair them, and `agent-mail status` says which. They do not differ i
 what a reader needs to do, which is to check mail rather than wait for it. A session
 cannot see any of this about itself: it emits successfully and hears no
 complaint.
+
+The fifth field counts unprocessed weft jobs whose submitter session is this
+one. It is read from a snapshot the daemon refreshes every 60 seconds
+(`~/.claude/agent-mail/weft-jobs.json`), never by running weft on the read
+path: `weft list jobs` takes seconds, and Claude Code drops the whole status
+line when the script overruns its budget. The field is empty when no usable
+snapshot exists, which covers a stopped daemon, a snapshot older than three
+minutes, and a weft that never ran. Empty and `0` are different claims: `0`
+says weft was asked and this session has nothing pending.
 
 It reads Claude Code's [statusLine](https://code.claude.com/docs/en/statusline)
 JSON payload on stdin, taking the session ID and project directory from it. Add
