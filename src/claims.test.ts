@@ -13,6 +13,8 @@ import {
   ClaimConflictError,
   type ClaimOwner,
   ClaimStore,
+  type PathClaim,
+  compareClaims,
   pathClaimTargets,
 } from "./claims.ts";
 import { projectSlug } from "./paths.ts";
@@ -253,6 +255,43 @@ test("a conflicting path claim from a dead session is displaced atomically", () 
   expect(store.list(project)).toEqual([replacement]);
 });
 
+test("claims sharing a timestamp order by what they are on, not by uuid", () => {
+  // Two acquisitions land in the same millisecond whenever the filesystem is
+  // fast enough, which is why this reproduced on a CI runner and not on the
+  // machine it was written on. The tie-break used to be the claim's random
+  // uuid, so the order of a same-millisecond pair differed between runs, and
+  // `claimPaths` reports the first conflicting claim it meets.
+  const at = "2026-08-19T20:00:00.000Z";
+  const claimOn = (path: string, id: string): PathClaim => ({
+    id,
+    type: "path",
+    project: "/p",
+    owner: { id: "o", label: "O" },
+    createdAt: at,
+    path,
+    pathType: "file",
+    paths: [{ path, pathType: "file" }],
+  });
+
+  // Same pair, opposite uuid orderings: the result must not change.
+  const one = [
+    claimOn("/p/stale.swift", "zzz"),
+    claimOn("/p/live.swift", "aaa"),
+  ];
+  const two = [
+    claimOn("/p/stale.swift", "aaa"),
+    claimOn("/p/live.swift", "zzz"),
+  ];
+  const paths = (claims: PathClaim[]) =>
+    [...claims].sort(compareClaims).map((claim) => claim.path);
+  expect(paths(one)).toEqual(["/p/live.swift", "/p/stale.swift"]);
+  expect(paths(two)).toEqual(paths(one));
+});
+
+function sortById<T extends { id: string }>(claims: T[]): T[] {
+  return [...claims].sort((a, b) => a.id.localeCompare(b.id));
+}
+
 test("a live conflict leaves earlier stale conflicts untouched", () => {
   const { project, store } = fixture();
   const stale = store.claimPath(
@@ -279,7 +318,12 @@ test("a live conflict leaves earlier stale conflicts untouched", () => {
       { ownerIsLive: (owner) => owner.id === ownerB.id },
     ),
   ).toThrow(ClaimConflictError);
-  expect(store.list(project)).toEqual([stale, live]);
+  // What matters is that both survive: the refused group released nothing,
+  // including the stale claim it was entitled to displace had it succeeded.
+  // Order is incidental and deliberately not asserted — claims made in one
+  // burst share a millisecond, so listing order is a stable display order
+  // rather than a creation sequence.
+  expect(sortById(store.list(project))).toEqual(sortById([stale, live]));
 });
 
 test("shutdown cleanup only releases claims from the same owner process", () => {

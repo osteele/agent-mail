@@ -73,6 +73,39 @@ export function pathClaimTargets(claim: AnyPathClaim): PathClaimTarget[] {
     : [{ path: claim.path, pathType: claim.pathType }];
 }
 
+/** Text identifying what a claim is on, used to order claims that share a
+ * timestamp. Derived from the record so it is the same on every machine. */
+function claimSortKey(claim: Claim): string {
+  return claim.type === "path"
+    ? pathClaimTargets(claim)
+        .map((target) => target.path)
+        .sort()
+        .join("\u0000")
+    : `${claim.notebook}\u0000${claim.experimentId}`;
+}
+
+/** Stable display order: timestamp, then what the claim is on.
+ *
+ * This is an order, not a history. `createdAt` has millisecond resolution and
+ * consecutive acquisitions land in the same millisecond essentially always, so
+ * the timestamp cannot separate the claims of one burst — and a multi-path
+ * group is exactly a burst. The previous tie-break was the claim's random uuid,
+ * which made the order of same-millisecond claims differ between runs. Nothing
+ * needs true creation sequence; `claimPaths` reports the first conflicting
+ * claim it meets, and callers need that to be the same claim every time rather
+ * than the oldest. The uuid remains only as a last resort, so the sort stays
+ * total when two claims name the same thing.
+ *
+ * If creation sequence is ever genuinely needed, it takes a counter on the
+ * record; do not read this ordering as one. */
+export function compareClaims(a: Claim, b: Claim): number {
+  return (
+    a.createdAt.localeCompare(b.createdAt) ||
+    claimSortKey(a).localeCompare(claimSortKey(b)) ||
+    a.id.localeCompare(b.id)
+  );
+}
+
 export class ClaimConflictError extends Error {
   constructor(
     public readonly claim: Claim,
@@ -174,10 +207,7 @@ export class ClaimStore {
     return readdirSync(dir)
       .filter((name) => name.endsWith(".json"))
       .map((name) => JSON.parse(readFileSync(join(dir, name), "utf8")) as Claim)
-      .sort(
-        (a, b) =>
-          a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
-      );
+      .sort(compareClaims);
   }
 
   listAll(): Claim[] {
@@ -186,9 +216,7 @@ export class ClaimStore {
       .filter((entry) => entry.isDirectory() && !entry.name.endsWith(".lock"))
       .flatMap((entry) => this.readDirectory(join(this.root, entry.name)))
       .sort(
-        (a, b) =>
-          a.project.localeCompare(b.project) ||
-          a.createdAt.localeCompare(b.createdAt),
+        (a, b) => a.project.localeCompare(b.project) || compareClaims(a, b),
       );
   }
 
