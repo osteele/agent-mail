@@ -57,20 +57,49 @@ test("notify --no-slack suppresses only that message's Slack echo", async () => 
   expect(requests[1].slackEcho).toBe(false);
 });
 
-test("status-line prints nothing and exits 0 when the session is alone", async () => {
+test("status-line prints nothing and exits 0 with no session to name", async () => {
   // The consumer is a shell substitution inside a status-line script, so a
   // non-zero exit is hazardous under `set -e` and stray output corrupts the
-  // user's prompt. Empty output is the signal for "nothing to show".
+  // user's prompt. Empty output is the signal for "nothing to show" — which
+  // now means only that no session id could be resolved. Being alone in the
+  // project is not that: the name is this session's address elsewhere, so it
+  // prints whether or not anyone is standing nearby.
   const project = mkdtempSync(join(tmpdir(), "agent-mail-statusline-"));
   const cli = join(import.meta.dir, "cli.ts");
+  // The environment carries this very session's id; inheriting it would have
+  // the test name the agent running it.
+  const env = { ...process.env };
+  for (const key of [
+    "CLAUDE_CODE_SESSION_ID",
+    "CODEX_THREAD_ID",
+    "AGENT_SESSION_ID",
+  ]) {
+    delete env[key];
+  }
   try {
     const child = Bun.spawn(
       [process.execPath, cli, "status-line", "--project", project],
-      { stdin: "pipe", stdout: "pipe", stderr: "pipe" },
+      { stdin: "pipe", stdout: "pipe", stderr: "pipe", env },
     );
     child.stdin.end();
     expect(await child.exited).toBe(0);
     expect(await new Response(child.stdout).text()).toBe("");
+
+    const named = Bun.spawn(
+      [
+        process.execPath,
+        cli,
+        "status-line",
+        "--project",
+        project,
+        "--session",
+        "solitary-session",
+      ],
+      { stdin: "pipe", stdout: "pipe", stderr: "pipe", env },
+    );
+    named.stdin.end();
+    expect(await named.exited).toBe(0);
+    expect((await new Response(named.stdout).text()).trim()).not.toBe("");
   } finally {
     rmSync(project, { recursive: true });
   }

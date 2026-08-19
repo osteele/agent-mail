@@ -220,9 +220,9 @@ attached with nobody home. Every surface (`list_sessions`, `listeners`,
 last two minutes), or `[idle <age>]`, flagged `stale?` after a day. Recency uses
 the latest of Claude Code's session-activity timestamp, the session's last
 agent-mail tool call, and its registration time. Treat long-idle sessions as
-probably vacant rather than as active agents. The same recency rule decides
-when the [status line](#claude-code-status-line) shows a session's name. A peer
-idle past a day no longer counts as company.
+probably vacant rather than as active agents. The same recency rule decides the
+peer count the [status line](#claude-code-status-line) reports. A peer idle past
+a day no longer counts as company.
 
 Channel-enabled sessions receive push delivery. Running sessions without the
 flag can arm a Monitor on their spool file. Other sessions read the spool on
@@ -658,9 +658,28 @@ echoes can't edit messages). See [Connecting to Slack](#connecting-to-slack).
 
 ## Claude Code status line
 
-`agent-mail status-line` prints this session's display name when another live,
-non-stale session shares the project. It prints nothing when the session has no
-live peers because the name would not disambiguate it.
+`agent-mail status-line` prints this session's display name, whether or not
+anyone else is in the project. The name is the session's address: agents in
+other projects refer to it by that name, so it is identity rather than
+disambiguation, and a name that came and went as peers appeared would be worse
+than one that is simply always there. It prints nothing only when the payload
+carries no session id.
+
+`--fields` prints one tab-separated line instead — `name`, peer count, unread
+messages, and this session's channel-push status — so a status line can show
+all four from a single invocation rather than reimplementing agent-mail's
+registry and spool semantics in shell:
+
+```
+Quiet Lantern\t2\t0\t
+Quiet Lantern\t2\t3\thost-not-loaded
+```
+
+The push status is empty when pushes are expected to land or the diagnosis was
+never recorded; `host-not-loaded` or `identity-unauthorized` mean this session's
+channel push goes nowhere and its mail arrives only when it pulls. A session is
+otherwise the last to find this out, since it emits nothing and hears no
+complaint.
 
 It reads Claude Code's [statusLine](https://code.claude.com/docs/en/statusline)
 JSON payload on stdin, taking the session ID and project directory from it. Add
@@ -679,15 +698,14 @@ cwd=$(printf '%s' "$input" | jq -r '.workspace.current_dir // .cwd // empty')
 session=""
 if [ -n "$input" ] && command -v agent-mail >/dev/null 2>&1; then
     session=$(printf '%s' "$input" | agent-mail status-line 2>/dev/null)
-    [ -n "$session" ] && session=" $session"
+    [ -n "$session" ] && session=" · $session"
 fi
 
 printf '%s%s\n' "${cwd/#$HOME/\~}" "$session"
 ```
 
 ```
-~/code/agent-tools/agent-mail                  # alone
-~/code/agent-tools/agent-mail Quiet Lantern    # sharing with another agent
+~/code/agent-tools/agent-mail · Quiet Lantern
 ```
 
 Then point `statusLine` at it in `~/.claude/settings.json`:
@@ -703,8 +721,16 @@ Then point `statusLine` at it in `~/.claude/settings.json`:
 - **Redirect stderr.** Anything the command writes to stderr would otherwise
   land in the prompt. `--debug` reports the resolved project, session ID, and
   each peer's recency tag there.
-- **Put it last.** The name appears and disappears as peers come and go.
-  Trailing placement keeps the rest of the line from shifting sideways.
+- **Give identity its own row.** A script can print several lines, each of
+  which Claude Code renders as its own status row. A single long line is
+  truncated from the right in a split pane, taking whatever is last with it, so
+  the name and any alarm belong on a short first row and expendable telemetry
+  on a second.
+- **Size the output with `$COLUMNS`.** Claude Code sets `COLUMNS` and `LINES`
+  before each run, and the value tracks the pane the session is actually in
+  (v2.1.153+). `tput cols` cannot work: the script's output is captured rather
+  than connected to the terminal. `LINES` is the terminal height, not a row
+  allowance — every row taken is a row of transcript lost.
 - **The exit code is always 0.** This includes errors, so `$(...)` stays safe
   under `set -e`. Empty output means "nothing to show."
 - Claude Code cancels a status line command when the next update arrives. A

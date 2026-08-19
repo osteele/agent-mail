@@ -81,6 +81,7 @@ import {
 } from "./paths.ts";
 import {
   liveInProject,
+  peersInProject,
   readListenerSnapshot,
   statusLineName,
 } from "./presence.ts";
@@ -109,6 +110,7 @@ import {
   knownProjects,
   markAllMessagesRead,
   markMessagesRead,
+  messageVisibleToSession,
   readMessages,
   readReceipts,
 } from "./spool.ts";
@@ -709,6 +711,28 @@ async function readStatusLinePayload(): Promise<StatusLinePayload | undefined> {
  * this addresses no mailbox, and `resolveProjectArg` both rejects unknown
  * directories and runs a full process scan, neither of which belongs on a path
  * that re-runs several times a second. */
+/** Messages this session has not read, counting only those it can see: a
+ * project spool is shared, and read state with it, but a session does not see
+ * its own sends or another session's directed mail. */
+function unreadForSession(project: string, sessionId: string): number {
+  return readMessages(project, { limit: 0, unreadOnly: true }).filter((msg) =>
+    messageVisibleToSession(msg, sessionId),
+  ).length;
+}
+
+/** This session's own channel-push diagnosis, or "" when it is not registered
+ * or the diagnosis was never recorded. The session is the last to learn its
+ * pushes go nowhere — it advertises the capability and hears no complaint — so
+ * this is the one place the news reaches the human in front of it. */
+function channelPushStatusFor(
+  sessions: Registration[],
+  sessionId: string | undefined,
+): string {
+  if (!sessionId) return "";
+  const self = sessions.find((r) => r.sessionId === sessionId);
+  return self?.capabilities?.channelPushStatus ?? "";
+}
+
 async function cmdStatusLine(
   flags: Record<string, string | boolean>,
 ): Promise<void> {
@@ -729,13 +753,24 @@ async function cmdStatusLine(
         : (payload?.session_id ?? sessionIdFromEnv());
     const sessions = liveInProject(project);
     const names = claudeSessions();
-    const name = statusLineName(
-      sessions,
-      project,
-      sessionId,
-      names,
-      Date.now(),
-    );
+    const name = statusLineName(project, sessionId, names);
+    if (flags.fields === true) {
+      // One spawn, every field the status line wants. A shell script that
+      // wanted these separately would have to either call this command four
+      // times or reimplement agent-mail's semantics against the registry and
+      // spool — the second is how a display layer starts owning facts it does
+      // not compute.
+      const peers = peersInProject(sessions, sessionId, names, Date.now());
+      console.log(
+        [
+          name,
+          peers.length,
+          sessionId ? unreadForSession(project, sessionId) : 0,
+          channelPushStatusFor(sessions, sessionId),
+        ].join("\t"),
+      );
+      return;
+    }
     if (debug) {
       console.error(`project: ${project}`);
       console.error(`session: ${sessionId ?? "(no session id)"}`);

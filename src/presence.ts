@@ -172,19 +172,20 @@ export function peersInProject(
   return present.slice(0, Math.max(0, present.length - 1));
 }
 
-/** The session's display name when another live agent shares the project, or
- * "" when it is alone. Pure: no filesystem, no clock. */
+/** The session's display name, whether or not anyone shares the project.
+ *
+ * This used to be gated on having a peer, on the theory that a name earns its
+ * width only when it disambiguates. That was wrong about what the name is for:
+ * agents in *other* projects address this session by this name, so it is the
+ * session's identity even when it is alone in its own directory, and a name
+ * that appears and disappears as peers come and go is worse than one that is
+ * simply always there. Peer count is a separate, independently useful fact —
+ * see `peersInProject`. Pure: no filesystem, no clock. */
 export function statusLineName(
-  sessions: Registration[],
   project: string,
   sessionId: string | undefined,
   meta: Map<string, ClaudeSessionMeta>,
-  nowMs: number,
 ): string {
-  // Resolve peers before deriving any name: `sessionNames` assigns and persists
-  // a generated name on first use, so the common alone case does no work and
-  // writes nothing.
-  if (peersInProject(sessions, sessionId, meta, nowMs).length === 0) return "";
   if (!sessionId) return "";
   return sessionDisplayName(sessionId, meta.get(sessionId), project);
 }

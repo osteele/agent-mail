@@ -168,7 +168,7 @@ test("liveInProject falls back to a scan when no snapshot exists", () => {
   expect(liveInProject(dir, NOW)).toEqual([]);
 });
 
-// --- the gate ----------------------------------------------------------------
+// --- peer count and name -----------------------------------------------------
 
 test("stale peers are excluded from the peer count", () => {
   const sessions = [
@@ -179,26 +179,27 @@ test("stale peers are excluded from the peer count", () => {
   const meta = metaMap({ self: { status: "busy", name: "Self Name" } });
   const peers = peersInProject(sessions, "self", meta, NOW);
   expect(peers.map((p) => p.sessionId)).toEqual(["fresh"]);
-  expect(statusLineName(sessions, "/proj", "self", meta, NOW)).toBe(
-    "Self Name",
-  );
+  expect(statusLineName("/proj", "self", meta)).toBe("Self Name");
 });
 
-test("a session alone in its project renders nothing", () => {
+test("a session alone in its project still renders its name", () => {
+  // The name is identity, not disambiguation: sessions in other projects
+  // address this one by it, so it does not depend on who is standing nearby.
   const sessions = [reg({ pid: 1, sessionId: "self" })];
   const meta = metaMap({ self: { status: "busy", name: "Self Name" } });
-  expect(statusLineName(sessions, "/proj", "self", meta, NOW)).toBe("");
+  expect(peersInProject(sessions, "self", meta, NOW)).toHaveLength(0);
+  expect(statusLineName("/proj", "self", meta)).toBe("Self Name");
 });
 
-test("an abandoned peer does not pin the name on forever", () => {
+test("an abandoned peer is not counted as a peer", () => {
   // The regression that matters: one long-dead session sharing the directory
-  // must not keep the name displayed indefinitely.
+  // must not be reported as company indefinitely.
   const sessions = [
     reg({ pid: 1, sessionId: "self" }),
     peer("abandoned", 40, 2),
   ];
   const meta = metaMap({ self: { status: "busy", name: "Self Name" } });
-  expect(statusLineName(sessions, "/proj", "self", meta, NOW)).toBe("");
+  expect(peersInProject(sessions, "self", meta, NOW)).toHaveLength(0);
 });
 
 test("a busy peer counts however old its last activity looks", () => {
@@ -221,12 +222,7 @@ test("self is excluded by session id, not by pid", () => {
   ];
   const meta = metaMap({ self: { status: "busy", name: "Self Name" } });
   expect(peersInProject(sessions, "self", meta, NOW)).toHaveLength(1);
-  // ...but the surviving entry is still this session, so nothing is rendered
-  // only when it is genuinely alone. Two entries for one id read as one peer,
-  // which is the conservative direction.
-  expect(statusLineName(sessions, "/proj", "self", meta, NOW)).toBe(
-    "Self Name",
-  );
+  expect(statusLineName("/proj", "self", meta)).toBe("Self Name");
 });
 
 test("an unidentifiable self discounts one live entry", () => {
@@ -261,6 +257,6 @@ test("legacy and canonical spellings of one directory collapse to one project", 
   expect(scoped).toHaveLength(2);
 
   const meta = metaMap({ self: { status: "busy", name: "Self Name" } });
-  expect(statusLineName(scoped, canon, "self", meta, NOW)).toBe("Self Name");
+  expect(statusLineName(canon, "self", meta)).toBe("Self Name");
   if (existsSync(root)) rmSync(root, { recursive: true, force: true });
 });
