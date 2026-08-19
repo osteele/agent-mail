@@ -1,0 +1,36 @@
+name: CI
+
+# `ci/**` lets a temporary branch be validated without opening a PR.
+on:
+  push:
+    branches: [main, "ci/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      # Report every platform. Cancelling the others on the first failure
+      # hides whether a fault is platform-specific, which is the main thing
+      # a three-OS matrix exists to answer.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Lint and typecheck
+        run: bun run check
+
+      - name: Test
+        run: bun test
