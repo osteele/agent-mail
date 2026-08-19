@@ -369,7 +369,7 @@ test("a sender is told only about pushes known to be dead", () => {
 test("an unknown or absent diagnosis is not reported as unreachable", () => {
   // Sessions registered by a build predating the diagnosis carry no status at
   // all. Counting those as dead would tell a sender every long-running peer is
-  // unreachable — the same overstatement as `pushed`, pointed the other way.
+  // unreachable, the same overstatement as `pushed` pointed the other way.
   expect(
     pushIsKnownUnreachable({
       ...CLAUDE_CAPABILITIES,

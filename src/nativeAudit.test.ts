@@ -13,8 +13,8 @@ import { nativeAuditFields, nativeAuditMessage } from "./nativeAudit.ts";
 test("native SendMessage hook input becomes a non-deliverable audit message", () => {
   // The point is that the hook's cwd is canonicalized. This used to ride on
   // macOS resolving /tmp to /private/tmp, which made the assertion a statement
-  // about the platform rather than about the code — on Linux /tmp is already
-  // canonical and the expectation could not hold. Build the symlink instead so
+  // about the platform rather than about the code. On Linux /tmp is already
+  // canonical, so the expectation could not hold. Build the symlink instead so
   // the same claim is tested everywhere.
   const root = realpathSync(mkdtempSync(join(tmpdir(), "agent-mail-audit-")));
   const real = join(root, "real");

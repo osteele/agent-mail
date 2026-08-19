@@ -2,18 +2,18 @@ import { test } from "bun:test";
 
 /** The property-based state-machine suites and the daemon-spawning dashboard
  * tests are CPU-bound, and their fixed timeouts were written against an idle
- * machine. This one routinely runs several agent sessions at once — load
- * averages above 100 are ordinary — and at that point the tests do not fail,
- * they time out: a false red on the most subtle logic in the repo, and one
- * that moves from run to run, which is worse than a stable red because it
- * teaches everyone to disregard the suite.
+ * machine. This one routinely runs several agent sessions at once, and load
+ * averages above 100 are ordinary. At that point the tests do not fail, they
+ * time out: a false red on the most subtle logic in the repo, and one that
+ * moves from run to run, which is worse than a stable red because it teaches
+ * everyone to disregard the suite.
  *
  * Two controls, and one rule:
  *
  * - `AGENT_MAIL_SLOW_TESTS=skip` drops them, for fast iteration on a loaded
  *   machine. They run by default: this repo has no CI yet, so defaulting to
- *   skip would mean nothing ever ran them. Once CI exists, it needs no
- *   configuration — it inherits the default — and a developer opts out
+ *   skip would mean nothing ever ran them. Once CI exists it needs no
+ *   configuration, since it inherits the default, and a developer opts out
  *   locally rather than CI opting in.
  * - `AGENT_MAIL_SLOW_TEST_TIMEOUT_MS` sets the budget, defaulting high enough
  *   to survive a loaded machine. A timeout should catch a hang, not a busy
@@ -52,8 +52,8 @@ let announced = false;
 /** `test`, for a suite that is slow by nature.
  *
  * Supplies the shared timeout when the caller names none, so the budget lives
- * in one place instead of as a literal beside each test — the arrangement that
- * let one suite keep bun's 5s default and time out first under load. An
+ * in one place instead of as a literal beside each test. That arrangement let
+ * one suite keep bun's 5s default and time out first under load. An
  * explicit timeout or options object still wins. Skipping is opt-in and loud. */
 export const slowTest: typeof test = ((...args: Parameters<typeof test>) => {
   const [name, fn, budget] = args;
