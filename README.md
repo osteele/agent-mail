@@ -90,11 +90,9 @@ Both sit in a wider set of agent infrastructure, listed at
 
 ## Quick start
 
-agent-mail runs from a source checkout and requires
-[Bun](https://bun.com/docs/installation). There is no `npx` one-liner and no
-published package: the daemon serves HTTP through Bun's runtime APIs, and the
-CLI is a TypeScript entry point with a `bun` shebang. Its automatic daemon
-installer currently uses macOS launchd.
+agent-mail is installed by cloning it, and requires
+[Bun](https://bun.com/docs/installation). Its automatic daemon installer
+currently uses macOS launchd.
 
 **Platforms.** macOS and Linux are tested in CI. Windows is unsupported:
 session liveness is read from `ps`, and without it the registry cannot prune
