@@ -24,5 +24,5 @@ or `GET /api/v1/state`, never agent-mail's files.
 semantics, and what presence and receipts do and do not prove.
 
 The daemon binds 127.0.0.1, so any process running as the local user can
-submit text. The README's [security note](../README.md#security-note) covers
+submit text. The README's [security section](../README.md#security) covers
 what that exposes and the inbound policies that contain it.

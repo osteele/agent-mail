@@ -18,4 +18,4 @@ echoes can't edit messages). See the README's
 [Connecting to Slack](../README.md#connecting-to-slack).
 
 The daemon binds 127.0.0.1; the README's
-[security note](../README.md#security-note) covers what that exposes.
+[security section](../README.md#security) covers what that exposes.

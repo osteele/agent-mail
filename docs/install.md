@@ -2,7 +2,7 @@
 
 How `agent-mail install` treats existing registrations, and the registration
 conflict that can silently disable channel push. The
-[README](../README.md#client-integration-and-updates) covers the normal
+[README](../README.md#updating-and-restarting) covers the normal
 install and update flow.
 
 ## Existing entries
